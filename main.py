@@ -1,0 +1,2446 @@
+from datetime import datetime, timedelta
+import re
+import os
+import json
+import subprocess
+import base64
+import urllib.request
+import urllib.parse
+import socket
+import ssl
+import time
+import uuid
+import sys
+import platform
+import shutil
+import zipfile
+from pathlib import Path
+from typing import List, Dict, Optional, Tuple
+
+from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QPushButton, QTextEdit, QLineEdit,
+                             QComboBox, QLabel, QDialog, QMessageBox, QSplitter,
+                             QGroupBox, QCheckBox, QListWidget, QListWidgetItem,
+                             QTabWidget, QFormLayout, QSpinBox, QDateTimeEdit,
+                             QMenu, QRadioButton)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime
+from PyQt6.QtGui import QAction, QFont, QPalette, QIcon
+
+# ==========================================
+# КОНСТАНТЫ И ПУТИ
+# ==========================================
+def get_base_dir() -> str:
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(os.path.abspath(__file__))
+
+def get_app_data_dir() -> str:
+    system = platform.system()
+    if system == 'Windows':
+        appdata = os.getenv('APPDATA') or os.path.expanduser('~\\AppData\\Roaming')
+        data_dir = os.path.join(appdata, 'BobcatProxy')
+    else:
+        xdg_config = os.getenv('XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
+        data_dir = os.path.join(xdg_config, 'BobcatProxy')
+    os.makedirs(data_dir, exist_ok=True)
+    return data_dir
+
+DATA_DIR = get_app_data_dir()
+BASE_DIR = get_base_dir()
+
+# Пути к файлам
+CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+KEYS_DB_PATH = os.path.join(DATA_DIR, "keys.json")
+SUBS_DB_PATH = os.path.join(DATA_DIR, "sub.json")
+LOGS_DIR = os.path.join(DATA_DIR, "xraylogs")
+GEOIP_PATH = os.path.join(DATA_DIR, "geoip.dat")
+GEOSITE_PATH = os.path.join(DATA_DIR, "geosite.dat")
+GEOSITE_RU_ONLY_PATH = os.path.join(DATA_DIR, "geosite-ru-only.dat")
+RU_BLOCKED_PATH = os.path.join(DATA_DIR, "ru-blocked-all.txt")
+
+# Настройки прокси
+LOCAL_PROXY_HOST = "127.0.0.1"
+LOCAL_PROXY_PORT = 25443
+DEFAULT_UPDATE_INTERVAL = 3600
+MIN_UPDATE_INTERVAL = 300
+
+# URL для загрузки файлов
+GEOIP_URL = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat"
+GEOSITE_URL = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/202604112225/geosite.dat"
+GEOSITE_RU_ONLY_URL = "https://github.com/runetfreedom/russia-blocked-geosite/releases/download/202604112126/geosite-ru-only.dat"
+RU_BLOCKED_URL = "https://github.com/runetfreedom/russia-blocked-geosite/releases/download/202604112126/ru-blocked-all.txt"
+XRAY_LINUX_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
+XRAY_WINDOWS_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip"
+
+# Режимы туннелирования
+TUNNEL_MODES = {
+    "ru_direct": {
+        "name": "Российские напрямую",
+        "desc": "Домены из geosite-ru-only.dat идут напрямую",
+        "file": GEOSITE_RU_ONLY_PATH,
+        "url": GEOSITE_RU_ONLY_URL
+    },
+    "blocked_tunnel": {
+        "name": "Всё напрямую кроме заблокированных",
+        "desc": "Домены из ru-blocked-all.txt идут в туннель",
+        "file": RU_BLOCKED_PATH,
+        "url": RU_BLOCKED_URL
+    },
+}
+
+# Форматы отображения ключей
+KEY_DISPLAY_MODES = {
+    "legacy": "Старый формат (как сейчас)",
+    "detailed": "Протокол | домен/IP | транспорт",
+    "hashtag": "Хештег / название сервера"
+}
+DEFAULT_KEY_DISPLAY_MODE = "legacy"
+
+# Режимы логирования
+LOG_MODES = {
+    "normal": "Обычный режим",
+    "debug": "Режим отладки (debug)"
+}
+DEFAULT_LOG_MODE = "normal"
+
+# ==========================================
+# ОПРЕДЕЛЕНИЕ ТЕМЫ СИСТЕМЫ
+# ==========================================
+def get_linux_theme() -> str:
+    try:
+        result = subprocess.run(
+            ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme'],
+            capture_output=True, text=True, timeout=2, check=False
+        )
+        if result.returncode == 0:
+            output = result.stdout.strip().strip("'")
+            if 'prefer-dark' in output or 'dark' in output:
+                return 'dark'
+            elif 'prefer-light' in output or 'light' in output:
+                return 'light'
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ['kreadconfig5', '--file', 'kdeglobals', '--group', 'Colors:Window', '--key', 'BackgroundNormal'],
+            capture_output=True, text=True, timeout=2, check=False
+        )
+        if result.returncode == 0:
+            color = result.stdout.strip()
+            if color and (color.startswith('#0') or color.startswith('#1') or color.startswith('#2')):
+                return 'dark'
+    except Exception:
+        pass
+    try:
+        desktop = os.getenv('XDG_CURRENT_DESKTOP', '').lower()
+        if 'dark' in os.getenv('GTK_THEME', '').lower():
+            return 'dark'
+        if 'kde' in desktop:
+            kde_config = Path.home() / '.config' / 'kdeglobals'
+            if kde_config.exists():
+                content = kde_config.read_text(errors='ignore').lower()
+                if 'breeze-dark' in content or 'dark' in content:
+                    return 'dark'
+    except Exception:
+        pass
+    try:
+        app = QApplication.instance()
+        if app and app.palette().color(QPalette.ColorRole.Window).lightness() < 128:
+            return 'dark'
+    except Exception:
+        pass
+    return 'light'
+
+def get_windows_theme() -> str:
+    try:
+        import winreg
+        key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return "light" if value == 1 else "dark"
+    except Exception:
+        return "dark"
+
+def get_system_theme() -> str:
+    system = platform.system()
+    if system == 'Windows':
+        return get_windows_theme()
+    else:
+        return get_linux_theme()
+
+# ==========================================
+# ЗАГРУЗКА ФАЙЛОВ
+# ==========================================
+def download_file(url: str, destination: str, timeout: int = 60) -> bool:
+    try:
+        print(f"⏬ Загрузка: {url}")
+        print(f"📁 Сохранение в: {destination}")
+        
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0'
+        })
+        
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            chunk_size = 8192
+            
+            with open(destination, 'wb') as f:
+                while True:
+                    chunk = response.read(chunk_size)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    downloaded += len(chunk)
+                    if total_size > 0:
+                        progress = (downloaded / total_size) * 100
+                        print(f"📊 Прогресс: {progress:.1f}%")
+        
+        print(f"✅ Загрузка завершена: {destination}")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка загрузки {url}: {e}")
+        return False
+
+def download_and_extract_zip(url: str, extract_to: str, timeout: int = 120) -> bool:
+    try:
+        print(f"⏬ Загрузка архива: {url}")
+        zip_path = os.path.join(DATA_DIR, "xray_temp.zip")
+        
+        req = urllib.request.Request(url, headers={
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0'
+        })
+        
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            with open(zip_path, 'wb') as f:
+                while True:
+                    chunk = response.read(8192)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        
+        print(f"📦 Распаковка в: {extract_to}")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_to)
+        
+        os.remove(zip_path)
+        print("✅ Xray-core успешно установлен")
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка установки Xray: {e}")
+        if os.path.exists(os.path.join(DATA_DIR, "xray_temp.zip")):
+            os.remove(os.path.join(DATA_DIR, "xray_temp.zip"))
+        return False
+
+def ensure_geoip_file(data_dir: str) -> bool:
+    geoip_path = os.path.join(data_dir, "geoip.dat")
+    if not os.path.exists(geoip_path):
+        print(f"⏬ geoip.dat не найден. Загрузка...")
+        return download_file(GEOIP_URL, geoip_path)
+    print(f"✅ geoip.dat найден: {geoip_path}")
+    return True
+
+def ensure_geosite_file(mode_key: str, data_dir: str) -> bool:
+    mode = TUNNEL_MODES.get(mode_key)
+    if not mode:
+        return False
+    
+    file_path = mode["file"]
+    url = mode["url"]
+    
+    if not os.path.exists(file_path):
+        print(f"⏬ Файл не найден: {file_path}. Загрузка...")
+        return download_file(url, file_path)
+    
+    print(f"✅ Файл найден: {file_path}")
+    return True
+
+def ensure_xray_binary() -> Tuple[Optional[str], str]:
+    system = platform.system()
+    bin_name = "xray.exe" if system == "Windows" else "xray"
+    
+    local_path = os.path.join(BASE_DIR, bin_name)
+    if os.path.exists(local_path):
+        return local_path, bin_name
+    
+    data_path = os.path.join(DATA_DIR, bin_name)
+    if os.path.exists(data_path):
+        return data_path, bin_name
+    
+    sys_path = shutil.which(bin_name)
+    if sys_path:
+        return sys_path, bin_name
+    
+    print(f"⚠️ {bin_name} не найден. Загрузка...")
+    url = XRAY_WINDOWS_URL if system == "Windows" else XRAY_LINUX_URL
+    
+    if download_and_extract_zip(url, DATA_DIR):
+        new_path = os.path.join(DATA_DIR, bin_name)
+        if os.path.exists(new_path):
+            if system != "Windows":
+                os.chmod(new_path, 0o755)
+            return new_path, bin_name
+    
+    return None, bin_name
+
+XRAY_PATH, XRAY_BINARY = ensure_xray_binary()
+ensure_geoip_file(DATA_DIR)
+
+# ==========================================
+# УТИЛИТЫ
+# ==========================================
+def load_json_file(path: str, default):
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return default
+
+def save_json_file(path: str, data):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def normalize_key(key_string: str) -> str:
+    if '#' in key_string and key_string.startswith(('vless://', 'vmess://', 'trojan://', 'ss://')):
+        return key_string.split('#')[0].strip()
+    return key_string.strip()
+
+def load_geosite_domains(file_path: str, mode_key: str) -> List[str]:
+    domains = []
+    if not os.path.exists(file_path):
+        return domains
+    
+    if file_path.endswith('.txt'):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    if line.startswith(('domain:', 'regexp:', 'full:', 'keyword:')):
+                        domains.append(line)
+                    elif line.startswith('.'):
+                        domains.append(f"domain:{line[1:]}")
+                    else:
+                        domains.append(f"domain:{line}")
+    
+    elif file_path.endswith('.dat'):
+        if "ru-only" in file_path or "russia-blocked" in file_path:
+            return []
+        elif "geosite.dat" in file_path and "Loyalsoldier" in file_path:
+            return ["geosite:category-ru", "geosite:ru"]
+        else:
+            return ["geosite:ru"]
+    
+    return domains
+
+def parse_key_for_display(key_string: str) -> Dict[str, str]:
+    """Парсит ключ и возвращает компоненты для детального отображения"""
+    result = {"protocol": "???", "address": "???", "transport": "???", "hashtag": ""}
+    
+    try:
+        # JSON конфиг
+        if key_string.startswith('{') and key_string.endswith('}'):
+            config = json.loads(key_string)
+            outbounds = config.get("outbounds", [])
+            for ob in outbounds:
+                if ob.get("tag") == "proxy":
+                    result["protocol"] = ob.get("protocol", "unknown").upper()
+                    settings = ob.get("settings", {})
+                    if "vnext" in settings and settings["vnext"]:
+                        result["address"] = settings["vnext"][0].get("address", "???")
+                    elif "servers" in settings and settings["servers"]:
+                        result["address"] = settings["servers"][0].get("address", "???")
+                    stream = ob.get("streamSettings", {})
+                    result["transport"] = stream.get("network", "tcp").upper()
+                    # Для JSON пробуем получить хештег из тега
+                    tag = ob.get("tag", "")
+                    if tag and tag != "proxy":
+                        result["hashtag"] = tag
+                    break
+            return result
+        
+        # VLESS
+        if key_string.startswith("vless://"):
+            result["protocol"] = "VLESS"
+            url_part = key_string[8:]
+            hashtag = ""
+            if '#' in url_part:
+                url_part, hashtag = url_part.split('#', 1)
+                result["hashtag"] = urllib.parse.unquote(hashtag)
+            if '?' in url_part:
+                addr_part, query = url_part.split('?', 1)
+                params = urllib.parse.parse_qs(query)
+            else:
+                addr_part, params = url_part, {}
+            if '@' in addr_part:
+                _, host_port = addr_part.rsplit('@', 1)
+                if host_port.startswith('['):
+                    end = host_port.index(']')
+                    result["address"] = host_port[1:end]
+                elif ':' in host_port:
+                    result["address"] = host_port.rsplit(':', 1)[0]
+            result["transport"] = params.get('type', ['tcp'])[0].upper()
+            return result
+        
+        # VMESS (base64 JSON)
+        if key_string.startswith("vmess://"):
+            result["protocol"] = "VMESS"
+            b64 = key_string[8:].strip()
+            hashtag = ""
+            # Проверяем, есть ли хештег в самом URL
+            if '#' in b64:
+                b64, hashtag = b64.split('#', 1)
+                result["hashtag"] = urllib.parse.unquote(hashtag)
+            b64 += '=' * (-len(b64) % 4)
+            try:
+                vmess = json.loads(base64.b64decode(b64).decode('utf-8'))
+                result["address"] = vmess.get('add', '???')
+                result["transport"] = vmess.get('net', 'tcp').upper()
+                # Если хештега нет в URL, пробуем взять из поля ps
+                if not result["hashtag"]:
+                    ps = vmess.get('ps', '')
+                    if ps:
+                        result["hashtag"] = ps
+            except Exception:
+                pass
+            return result
+        
+        # Trojan
+        if key_string.startswith("trojan://"):
+            result["protocol"] = "TROJAN"
+            url_part = key_string[9:]
+            hashtag = ""
+            if '#' in url_part:
+                url_part, hashtag = url_part.split('#', 1)
+                result["hashtag"] = urllib.parse.unquote(hashtag)
+            if '?' in url_part:
+                addr_part, query = url_part.split('?', 1)
+                params = urllib.parse.parse_qs(query)
+            else:
+                addr_part, params = url_part, {}
+            if '@' in addr_part:
+                _, host_port = addr_part.rsplit('@', 1)
+                if host_port.startswith('['):
+                    end = host_port.index(']')
+                    result["address"] = host_port[1:end]
+                elif ':' in host_port:
+                    result["address"] = host_port.rsplit(':', 1)[0]
+            result["transport"] = params.get('type', ['tcp'])[0].upper()
+            return result
+        
+        # Shadowsocks
+        if key_string.startswith("ss://"):
+            result["protocol"] = "SS"
+            url_part = key_string[5:]
+            hashtag = ""
+            if '#' in url_part:
+                url_part, hashtag = url_part.split('#', 1)
+                result["hashtag"] = urllib.parse.unquote(hashtag)
+            if '?' in url_part:
+                addr_part = url_part.split('?')[0]
+            else:
+                addr_part = url_part
+            try:
+                padded = addr_part + '=' * (-len(addr_part) % 4)
+                decoded = base64.b64decode(padded).decode('utf-8', errors='ignore')
+                if '@' in decoded:
+                    _, hp = decoded.rsplit('@', 1)
+                    if ':' in hp:
+                        result["address"] = hp.rsplit(':', 1)[0]
+            except Exception:
+                pass
+            result["transport"] = "TCP"
+            return result
+            
+    except Exception:
+        pass
+    
+    return result
+
+# ==========================================
+# МЕНЕДЖЕР ПОДПИСОК
+# ==========================================
+class SubscriptionManager:
+    def __init__(self, keys_path: str, subs_path: str):
+        self.keys_path = keys_path
+        self.subs_path = subs_path
+        self.keys = self._load_keys()
+        self.subscriptions = self._load_subscriptions()
+
+    def _load_keys(self) -> list:
+        raw = load_json_file(self.keys_path, [])
+        if raw and isinstance(raw, list) and isinstance(raw[0], str):
+            converted = []
+            for key in raw:
+                converted.append({
+                    "key": key,
+                    "source": "manual",
+                    "sub_url": None,
+                    "added": datetime.now().isoformat(),
+                    "id": str(uuid.uuid4())[:8]
+                })
+            self._save_keys(converted)
+            return converted
+        return raw if isinstance(raw, list) else []
+
+    def _load_subscriptions(self) -> list:
+        raw = load_json_file(self.subs_path, {"subscriptions": []})
+        return raw.get("subscriptions", []) if isinstance(raw, dict) else []
+
+    def _save_keys(self, keys: list = None):
+        if keys is not None:
+            self.keys = keys
+        save_json_file(self.keys_path, self.keys)
+
+    def _save_subscriptions(self, subs: list = None):
+        if subs is not None:
+            self.subscriptions = subs
+        save_json_file(self.subs_path, {"subscriptions": self.subscriptions})
+
+    def add_subscription(self, url: str, interval: int = DEFAULT_UPDATE_INTERVAL) -> dict:
+        for sub in self.subscriptions:
+            if sub["url"] == url:
+                return sub
+        new_sub = {
+            "id": str(uuid.uuid4()),
+            "url": url,
+            "name": f"Подписка {len(self.subscriptions) + 1}",
+            "update_interval": interval,
+            "last_update": None,
+            "enabled": True,
+            "key_count": 0
+        }
+        self.subscriptions.append(new_sub)
+        self._save_subscriptions()
+        return new_sub
+
+    def remove_subscription(self, sub_id: str, remove_keys: bool = True):
+        sub = self.get_subscription(sub_id)
+        if not sub:
+            return False
+        if remove_keys:
+            self.keys = [k for k in self.keys if k.get("sub_url") != sub["url"]]
+            self._save_keys()
+        self.subscriptions = [s for s in self.subscriptions if s["id"] != sub_id]
+        self._save_subscriptions()
+        return True
+
+    def get_subscription(self, sub_id: str) -> Optional[dict]:
+        for sub in self.subscriptions:
+            if sub["id"] == sub_id:
+                return sub
+        return None
+
+    def update_subscription(self, sub_id: str, **kwargs):
+        sub = self.get_subscription(sub_id)
+        if sub:
+            sub.update(kwargs)
+            self._save_subscriptions()
+            return True
+        return False
+
+    def add_manual_key(self, key_string: str) -> bool:
+        normalized = normalize_key(key_string)
+        for k in self.keys:
+            if normalize_key(k["key"]) == normalized:
+                return False
+        self.keys.append({
+            "key": key_string,
+            "source": "manual",
+            "sub_url": None,
+            "added": datetime.now().isoformat(),
+            "id": str(uuid.uuid4())[:8]
+        })
+        self._save_keys()
+        return True
+
+    def add_keys_from_subscription(self, sub_url: str, key_strings: list) -> int:
+        count = 0
+        existing_keys = {normalize_key(k["key"]): k for k in self.keys
+                        if k.get("sub_url") == sub_url}
+        for key_str in key_strings:
+            normalized = normalize_key(key_str)
+            if normalized in existing_keys:
+                existing_keys[normalized]["key"] = key_str
+                existing_keys[normalized]["updated"] = datetime.now().isoformat()
+            else:
+                if any(normalize_key(k["key"]) == normalized for k in self.keys):
+                    continue
+                self.keys.append({
+                    "key": key_str,
+                    "source": "subscription",
+                    "sub_url": sub_url,
+                    "added": datetime.now().isoformat(),
+                    "id": str(uuid.uuid4())[:8]
+                })
+                count += 1
+        keys_to_keep = []
+        normalized_new_keys = {normalize_key(ks) for ks in key_strings}
+        for k in self.keys:
+            if k.get("sub_url") == sub_url and normalize_key(k["key"]) not in normalized_new_keys:
+                continue
+            keys_to_keep.append(k)
+        self.keys = keys_to_keep
+        for sub in self.subscriptions:
+            if sub["url"] == sub_url:
+                sub["key_count"] = len([k for k in self.keys if k.get("sub_url") == sub_url])
+                sub["last_update"] = datetime.now().isoformat()
+                break
+        self._save_keys()
+        self._save_subscriptions()
+        return count
+
+    def get_keys_by_source(self, source: str = None, sub_id: str = None) -> list:
+        result = self.keys
+        if source == "manual":
+            result = [k for k in result if k.get("source") == "manual"]
+        elif source == "subscription":
+            result = [k for k in result if k.get("source") == "subscription"]
+        if sub_id:
+            sub = self.get_subscription(sub_id)
+            if sub:
+                result = [k for k in result if k.get("sub_url") == sub["url"]]
+        return result
+
+    def get_subscriptions_due_update(self) -> list:
+        due = []
+        now = datetime.now()
+        for sub in self.subscriptions:
+            if not sub.get("enabled", True):
+                continue
+            last = sub.get("last_update")
+            interval = sub.get("update_interval", DEFAULT_UPDATE_INTERVAL)
+            if not last:
+                due.append(sub)
+            else:
+                last_dt = datetime.fromisoformat(last)
+                if now - last_dt >= timedelta(seconds=interval):
+                    due.append(sub)
+        return due
+
+# ==========================================
+# СИСТЕМНЫЙ ПРОКСИ
+# ==========================================
+def set_linux_proxy_gnome(enable: bool, host: str = "127.0.0.1", port: int = 25443):
+    try:
+        mode = "manual" if enable else "none"
+        subprocess.run(['gsettings', 'set', 'org.gnome.system.proxy', 'mode', mode],
+                      check=False, capture_output=True, timeout=5)
+        if enable:
+            for proto in ['socks', 'http', 'https']:
+                subprocess.run(['gsettings', 'set', f'org.gnome.system.proxy.{proto}', 'host', host],
+                              check=False, capture_output=True, timeout=5)
+                subprocess.run(['gsettings', 'set', f'org.gnome.system.proxy.{proto}', 'port', str(port)],
+                              check=False, capture_output=True, timeout=5)
+        return True
+    except Exception:
+        return False
+
+def set_linux_proxy_kde(enable: bool, host: str = "127.0.0.1", port: int = 25443):
+    try:
+        if enable:
+            subprocess.run(['kwriteconfig5', '--file', 'kioslaverc', '--group', 'Proxy Settings',
+                           '--key', 'ProxyType', '1'], check=False, capture_output=True, timeout=5)
+            subprocess.run(['kwriteconfig5', '--file', 'kioslaverc', '--group', 'Proxy Settings',
+                           '--key', 'socksProxy', f'{host}:{port}'], check=False, capture_output=True, timeout=5)
+        else:
+            subprocess.run(['kwriteconfig5', '--file', 'kioslaverc', '--group', 'Proxy Settings',
+                           '--key', 'ProxyType', '0'], check=False, capture_output=True, timeout=5)
+        subprocess.run(['qdbus', 'org.kde.kioslave.http', '/kioslave/http', 'reparseConfiguration'],
+                      check=False, capture_output=True, timeout=2)
+        return True
+    except Exception:
+        return False
+
+def set_linux_proxy_env(enable: bool, host: str = "127.0.0.1", port: int = 25443):
+    try:
+        if enable:
+            os.environ['ALL_PROXY'] = f'socks5://{host}:{port}'
+            os.environ['all_proxy'] = f'socks5://{host}:{port}'
+            os.environ['HTTP_PROXY'] = f'socks5://{host}:{port}'
+            os.environ['HTTPS_PROXY'] = f'socks5://{host}:{port}'
+        else:
+            for var in ['ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY',
+                        'http_proxy', 'https_proxy', 'FTP_PROXY', 'ftp_proxy']:
+                os.environ.pop(var, None)
+        return True
+    except Exception:
+        return False
+
+def set_linux_proxy(enable: bool, host: str = "127.0.0.1", port: int = 25443) -> bool:
+    success = False
+    if set_linux_proxy_gnome(enable, host, port):
+        success = True
+    if set_linux_proxy_kde(enable, host, port):
+        success = True
+    set_linux_proxy_env(enable, host, port)
+    return success
+
+def set_system_proxy(enable: bool, host: str = "127.0.0.1", port: int = 25443):
+    system = platform.system()
+    if system == 'Windows':
+        try:
+            import winreg
+            import ctypes
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
+                if enable:
+                    winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
+                    winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"{host}:{port}")
+                else:
+                    winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        except Exception as e:
+            print(f"Ошибка прокси: {e}")
+            return False
+        try:
+            ctypes.windll.wininet.InternetSetOptionW(None, 39, None, 0)
+            ctypes.windll.wininet.InternetSetOptionW(None, 37, None, 0)
+        except Exception:
+            pass
+        return True
+    else:
+        return set_linux_proxy(enable, host, port)
+
+# ==========================================
+# МОНИТОР ЗАДЕРЖКИ
+# ==========================================
+class LatencyMonitor(QThread):
+    warning_signal = pyqtSignal(str)
+    status_signal = pyqtSignal(str)
+    CHECK_INTERVAL = 30
+    TIMEOUT = 10
+    WARNING_THRESHOLD = 600
+    TEST_URL = "https://www.google.com/generate_204"
+
+    def __init__(self, proxy_host: str, proxy_port: int):
+        super().__init__()
+        self.proxy_host = proxy_host
+        self.proxy_port = proxy_port
+        self.running = False
+        self.daemon = True
+
+    def run(self):
+        self.running = True
+        self.status_signal.emit("🔍Мониторинг задержки запущен")
+        while self.running:
+            for _ in range(self.CHECK_INTERVAL):
+                if not self.running:
+                    break
+                self.msleep(1000)
+            if not self.running:
+                break
+            latency = self._measure_latency()
+            if latency is None:
+                self.warning_signal.emit("🔴 ПРЕДУПРЕЖДЕНИЕ: Таймаут соединения")
+            elif latency > self.WARNING_THRESHOLD:
+                self.warning_signal.emit(f"🔴 ПРЕДУПРЕЖДЕНИЕ: Высокая задержка ({latency} мс)")
+            else:
+                self.status_signal.emit(f"🟢 Задержка в норме: {latency} мс")
+
+    def _measure_latency(self):
+        try:
+            proxy_handler = urllib.request.ProxyHandler({
+                'https': f'socks5h://{self.proxy_host}:{self.proxy_port}',
+                'http': f'socks5h://{self.proxy_host}:{self.proxy_port}'
+            })
+            opener = urllib.request.build_opener(proxy_handler)
+            opener.addheaders = [('User-Agent', 'Mozilla/5.0')]
+            start_time = time.time()
+            response = opener.open(self.TEST_URL, timeout=self.TIMEOUT)
+            response.read()
+            elapsed_ms = int((time.time() - start_time) * 1000)
+            response.close()
+            return elapsed_ms
+        except Exception:
+            return self._measure_latency_socket()
+
+    def _measure_latency_socket(self):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.TIMEOUT)
+            start = time.time()
+            sock.connect((self.proxy_host, self.proxy_port))
+            elapsed = int((time.time() - start) * 1000)
+            sock.close()
+            return elapsed
+        except Exception:
+            return None
+
+    def stop(self):
+        self.running = False
+
+# ==========================================
+# WORKER ОБНОВЛЕНИЯ ПОДПИСОК
+# ==========================================
+class SubscriptionUpdateWorker(QThread):
+    log_signal = pyqtSignal(str)
+    progress_signal = pyqtSignal(str, int, int)
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, sub_manager: SubscriptionManager):
+        super().__init__()
+        self.sub_manager = sub_manager
+        self.running = True
+        self.daemon = True
+
+    def run(self):
+        while self.running:
+            due_subs = self.sub_manager.get_subscriptions_due_update()
+            if due_subs:
+                self.log_signal.emit(f"📡 Найдено {len(due_subs)} подписок для обновления")
+                total = len(due_subs)
+                for i, sub in enumerate(due_subs, 1):
+                    if not self.running:
+                        break
+                    self.progress_signal.emit(sub.get("name", sub["url"]), i, total)
+                    success, message = self._update_single_subscription(sub)
+                    if success:
+                        self.log_signal.emit(f"✅ {sub.get('name', 'Подписка')}: {message}")
+                    else:
+                        self.log_signal.emit(f"❌ {sub.get('name', 'Подписка')}: {message}")
+                    self.msleep(2000)
+            for _ in range(60):
+                if not self.running:
+                    break
+                self.msleep(1000)
+
+    def _parse_subscription_data(self, data: str) -> List[str]:
+        data = data.strip()
+        valid_keys = []
+        try:
+            json_data = json.loads(data)
+            if isinstance(json_data, list):
+                for item in json_data:
+                    if isinstance(item, str):
+                        item = item.strip()
+                        if item.startswith(('vmess://', 'vless://', 'trojan://', 'ss://')):
+                            valid_keys.append(item)
+                        elif isinstance(item, dict) and "outbounds" in item:
+                            valid_keys.append(json.dumps(item, ensure_ascii=False))
+            elif isinstance(json_data, dict):
+                if "outbounds" in json_data and "inbounds" in json_data:
+                    valid_keys.append(json.dumps(json_data, ensure_ascii=False))
+                else:
+                    for value in json_data.values():
+                        if isinstance(value, str) and value.startswith(('vmess://', 'vless://', 'trojan://', 'ss://')):
+                            valid_keys.append(value.strip())
+            return valid_keys
+        except json.JSONDecodeError:
+            pass
+        try:
+            padded = data + '=' * (-len(data) % 4)
+            decoded = base64.b64decode(padded).decode('utf-8')
+            lines = [l.strip() for l in decoded.splitlines() if l.strip()]
+            valid_keys = [l for l in lines if l.startswith(('vmess://', 'vless://', 'trojan://', 'ss://'))]
+            if valid_keys:
+                return valid_keys
+        except Exception:
+            pass
+        lines = [l.strip() for l in data.splitlines() if l.strip()]
+        valid_keys = [l for l in lines if l.startswith(('vmess://', 'vless://', 'trojan://', 'ss://'))]
+        return valid_keys
+
+    def _update_single_subscription(self, sub: dict) -> Tuple[bool, str]:
+        url = sub["url"]
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0'})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = response.read().decode('utf-8')
+                valid_keys = self._parse_subscription_data(data)
+                if valid_keys:
+                    count = self.sub_manager.add_keys_from_subscription(url, valid_keys)
+                    return True, f"Обновлено: {count} новых ключей, всего: {sub.get('key_count', len(valid_keys))}"
+                else:
+                    return False, "Не найдено валидных ключей в подписке"
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP ошибка {e.code}: {e.reason}"
+        except urllib.error.URLError as e:
+            return False, f"Ошибка сети: {e.reason}"
+        except Exception as e:
+            return False, f"Ошибка: {str(e)}"
+
+    def stop(self):
+        self.running = False
+
+# ==========================================
+# XRAY WORKER
+# ==========================================
+class XrayWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal()
+
+    def __init__(self, config_path):
+        super().__init__()
+        self.config_path = config_path
+        self.process = None
+        self.is_running = False
+
+    def run(self):
+        if not XRAY_PATH or not os.path.exists(XRAY_PATH):
+            self.log_signal.emit(f"❌ ОШИБКА: {XRAY_BINARY} не найден")
+            self.finished_signal.emit()
+            return
+        self.log_signal.emit(f"📍 Найден xray: {XRAY_PATH}")
+        system = platform.system()
+        kwargs = {
+            'stdout': subprocess.PIPE,
+            'stderr': subprocess.STDOUT,
+            'text': True,
+            'bufsize': 1
+        }
+        if system == 'Windows':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            kwargs['startupinfo'] = startupinfo
+            kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+        else:
+            kwargs['close_fds'] = True
+            kwargs['start_new_session'] = True
+        try:
+            self.process = subprocess.Popen(
+                [XRAY_PATH, "run", "-c", self.config_path],
+                **kwargs
+            )
+            self.is_running = True
+            if self.process.stdout:
+                for line in self.process.stdout:
+                    if not self.is_running:
+                        break
+                    self.log_signal.emit(line.strip())
+        except Exception as e:
+            self.log_signal.emit(f"❌ КРИТИЧЕСКАЯ ОШИБКА: {str(e)}")
+        finally:
+            self.finished_signal.emit()
+
+    def stop(self):
+        self.is_running = False
+        if self.process:
+            try:
+                self.process.terminate()
+                self.process.wait(timeout=3)
+            except (subprocess.TimeoutExpired, ProcessLookupError):
+                try:
+                    self.process.kill()
+                except ProcessLookupError:
+                    pass
+
+# ==========================================
+# ДИАЛОГ НАСТРОЕК МАРШРУТИЗАЦИИ
+# ==========================================
+class TunnelingSettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent_window = parent
+        self.setWindowTitle("⚙️ Настройки маршрутизации")
+        self.setMinimumSize(550, 400)
+        self.setFont(QFont("Arial"))
+        self._init_ui()
+        self._load_current_settings()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        
+        desc_label = QLabel("Выберите режим маршрутизации трафика:")
+        desc_label.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        layout.addWidget(desc_label)
+        
+        self.mode_group = QGroupBox("Режимы маршрутизации")
+        mode_layout = QVBoxLayout(self.mode_group)
+        
+        self.mode_radio = {}
+        for mode_key, mode_info in TUNNEL_MODES.items():
+            radio = QRadioButton(f"{mode_info['name']}")
+            radio.setToolTip(mode_info['desc'])
+            radio.clicked.connect(lambda checked, k=mode_key: self._on_mode_changed(k))
+            self.mode_radio[mode_key] = radio
+            mode_layout.addWidget(radio)
+        
+        layout.addWidget(self.mode_group)
+        
+        self.file_status = QLabel("")
+        self.file_status.setStyleSheet("color: #666; font-size: 9pt;")
+        layout.addWidget(self.file_status)
+        
+        btn_layout = QHBoxLayout()
+        self.btn_download = QPushButton("🔄 Проверить и скачать файлы")
+        self.btn_download.clicked.connect(self._check_and_download_files)
+        self.btn_apply = QPushButton("✅ Применить")
+        self.btn_apply.clicked.connect(self._apply_settings)
+        self.btn_apply.setEnabled(False)
+        self.btn_cancel = QPushButton("Отмена")
+        self.btn_cancel.clicked.connect(self.reject)
+        
+        btn_layout.addWidget(self.btn_download)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_apply)
+        btn_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btn_layout)
+        
+        self.progress_label = QLabel("")
+        self.progress_label.setStyleSheet("color: #0066cc;")
+        layout.addWidget(self.progress_label)
+
+    def _load_current_settings(self):
+        settings = load_json_file(os.path.join(DATA_DIR, "tunnel_settings.json"), {})
+        current_mode = settings.get("mode", "ru_direct")
+        if current_mode in self.mode_radio:
+            self.mode_radio[current_mode].setChecked(True)
+            self._update_file_status(current_mode)
+
+    def _on_mode_changed(self, mode_key: str):
+        self._update_file_status(mode_key)
+        self.btn_apply.setEnabled(True)
+
+    def _update_file_status(self, mode_key: str):
+        mode = TUNNEL_MODES.get(mode_key)
+        if not mode:
+            return
+        file_path = mode["file"]
+        exists = os.path.exists(file_path)
+        status = "✅" if exists else "❌"
+        self.file_status.setText(f"{status} Файл: {os.path.basename(file_path)} | {'Найден' if exists else 'Требуется загрузка'}")
+
+    def _check_and_download_files(self):
+        self.btn_download.setEnabled(False)
+        self.progress_label.setText("🔄 Проверка файлов...")
+        QApplication.processEvents()
+        
+        success_count = 0
+        total = len(TUNNEL_MODES)
+        
+        for i, (mode_key, mode_info) in enumerate(TUNNEL_MODES.items(), 1):
+            self.progress_label.setText(f"📥 [{i}/{total}] {mode_info['name']}...")
+            QApplication.processEvents()
+            
+            if ensure_geosite_file(mode_key, DATA_DIR):
+                success_count += 1
+        
+        if ensure_geoip_file(DATA_DIR):
+            success_count += 1
+        
+        self.progress_label.setText(f"✅ Готово: {success_count}/{total + 1} файлов")
+        self.btn_download.setEnabled(True)
+        
+        current_mode = next((k for k, r in self.mode_radio.items() if r.isChecked()), None)
+        if current_mode:
+            self._update_file_status(current_mode)
+        
+        QMessageBox.information(self, "Результат", f"Проверка завершена.\nУспешно: {success_count}/{total + 1}")
+
+    def _apply_settings(self):
+        selected_mode = None
+        for mode_key, radio in self.mode_radio.items():
+            if radio.isChecked():
+                selected_mode = mode_key
+                break
+        
+        if not selected_mode:
+            QMessageBox.warning(self, "Ошибка", "Выберите режим туннелирования!")
+            return
+        
+        mode = TUNNEL_MODES[selected_mode]
+        if not os.path.exists(mode["file"]):
+            reply = QMessageBox.question(
+                self, "Файл не найден",
+                f"Файл для режима '{mode['name']}' отсутствует.\nСкачать сейчас?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.progress_label.setText(f"⏬ Загрузка {os.path.basename(mode['file'])}...")
+                QApplication.processEvents()
+                if not download_file(mode["url"], mode["file"]):
+                    QMessageBox.critical(self, "Ошибка", "Не удалось скачать файл!")
+                    return
+            else:
+                return
+        
+        settings = {
+            "mode": selected_mode,
+            "mode_name": mode["name"],
+            "updated": datetime.now().isoformat()
+        }
+        save_json_file(os.path.join(DATA_DIR, "tunnel_settings.json"), settings)
+        
+        if self.parent_window and hasattr(self.parent_window, 'update_tunnel_mode'):
+            self.parent_window.update_tunnel_mode(selected_mode)
+        
+        QMessageBox.information(self, "Успех", f"Режим применён: {mode['name']}")
+        self.accept()
+
+# ==========================================
+# ДИАЛОГ УПРАВЛЕНИЯ ПОДПИСКАМИ
+# ==========================================
+class SubscriptionDialog(QDialog):
+    def __init__(self, sub_manager: SubscriptionManager, parent=None):
+        super().__init__(parent)
+        self.sub_manager = sub_manager
+        self.setWindowTitle("Управление подписками")
+        self.setMinimumSize(500, 400)
+        self.setFont(QFont("Arial"))
+        self._init_ui()
+        self._load_subscriptions()
+
+    def _init_ui(self):
+        layout = QVBoxLayout(self)
+        form_group = QGroupBox("Добавить подписку")
+        form_layout = QFormLayout(form_group)
+        self.url_input = QLineEdit()
+        self.url_input.setPlaceholderText("https://example.com/sub")
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("Название (опционально)")
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setRange(MIN_UPDATE_INTERVAL // 60, 1440)
+        self.interval_spin.setValue(DEFAULT_UPDATE_INTERVAL // 60)
+        self.interval_spin.setSuffix(" мин")
+        form_layout.addRow("URL:", self.url_input)
+        form_layout.addRow("Название:", self.name_input)
+        form_layout.addRow("Интервал:", self.interval_spin)
+        add_btn = QPushButton("➕ Добавить подписку")
+        add_btn.clicked.connect(self._add_subscription)
+        form_layout.addRow(add_btn)
+        layout.addWidget(form_group)
+
+        list_group = QGroupBox("Активные подписки")
+        list_layout = QVBoxLayout(list_group)
+        self.sub_list = QListWidget()
+        self.sub_list.itemDoubleClicked.connect(self._edit_subscription)
+        list_layout.addWidget(self.sub_list)
+
+        btn_layout = QHBoxLayout()
+        self.btn_refresh = QPushButton("🔄 Обновить сейчас")
+        self.btn_refresh.clicked.connect(self._force_update_selected)
+        self.btn_delete = QPushButton("🗑️ Удалить")
+        self.btn_delete.clicked.connect(self._delete_selected)
+        self.btn_delete.setStyleSheet("background-color: #FF1800; color: white;")
+        btn_layout.addWidget(self.btn_refresh)
+        btn_layout.addWidget(self.btn_delete)
+        list_layout.addLayout(btn_layout)
+        layout.addWidget(list_group)
+
+        close_btn = QPushButton("Закрыть")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+
+    def _load_subscriptions(self):
+        self.sub_list.clear()
+        for sub in self.sub_manager.subscriptions:
+            last_upd = sub.get("last_update")
+            if last_upd:
+                last_str = datetime.fromisoformat(last_upd).strftime("%H:%M %d.%m")
+            else:
+                last_str = "никогда"
+            status = "✅ " if sub.get("enabled", True) else "⏸️ "
+            text = f"{status}{sub.get('name', 'Без названия')}\n"
+            text += f"🔗 {sub['url'][:40]}...\n"
+            text += f"📊 Ключей: {sub.get('key_count', 0)} | 🕐 Обновлено: {last_str}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, sub["id"])
+            self.sub_list.addItem(item)
+
+    def _add_subscription(self):
+        url = self.url_input.text().strip()
+        if not url.startswith("http"):
+            QMessageBox.warning(self, "Ошибка", "Введите корректный URL подписки!")
+            return
+        name = self.name_input.text().strip() or f"Подписка {len(self.sub_manager.subscriptions) + 1}"
+        interval = self.interval_spin.value() * 60
+        new_sub = self.sub_manager.add_subscription(url, interval)
+        if name != new_sub["name"]:
+            self.sub_manager.update_subscription(new_sub["id"], name=name)
+        self._load_subscriptions()
+        self.url_input.clear()
+        self.name_input.clear()
+        QMessageBox.information(self, "Успех", "Подписка добавлена!")
+
+    def _edit_subscription(self, item: QListWidgetItem):
+        sub_id = item.data(Qt.ItemDataRole.UserRole)
+        sub = self.sub_manager.get_subscription(sub_id)
+        if not sub:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Редактировать: {sub.get('name', 'Подписка')}")
+        layout = QFormLayout(dialog)
+        interval_spin = QSpinBox()
+        interval_spin.setRange(MIN_UPDATE_INTERVAL // 60, 1440)
+        interval_spin.setValue(sub.get("update_interval", DEFAULT_UPDATE_INTERVAL) // 60)
+        interval_spin.setSuffix(" мин")
+        enabled_check = QCheckBox("Включено")
+        enabled_check.setChecked(sub.get("enabled", True))
+        layout.addRow("Интервал обновления:", interval_spin)
+        layout.addRow(enabled_check)
+        btn_layout = QHBoxLayout()
+        save_btn = QPushButton("Сохранить")
+        save_btn.clicked.connect(lambda: self._save_edit(sub_id, interval_spin.value(), enabled_check.isChecked(), dialog))
+        cancel_btn = QPushButton("Отмена")
+        cancel_btn.clicked.connect(dialog.reject)
+        btn_layout.addWidget(save_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addRow(btn_layout)
+        dialog.exec()
+
+    def _save_edit(self, sub_id: str, interval_min: int, enabled: bool, dialog: QDialog):
+        self.sub_manager.update_subscription(sub_id, update_interval=interval_min * 60, enabled=enabled)
+        self._load_subscriptions()
+        dialog.accept()
+
+    def _delete_selected(self):
+        item = self.sub_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Внимание", "Выберите подписку!")
+            return
+        sub_id = item.data(Qt.ItemDataRole.UserRole)
+        sub = self.sub_manager.get_subscription(sub_id)
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            f"Удалить подписку '{sub.get('name', sub['url'])}'?\n\n"
+            f"⚠️ Также будут удалены все ключи из этой подписки!",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.sub_manager.remove_subscription(sub_id, remove_keys=True)
+            self._load_subscriptions()
+            if self.parent() and hasattr(self.parent(), 'refresh_keys_list'):
+                self.parent().refresh_keys_list()
+
+    def _force_update_selected(self):
+        item = self.sub_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, "Внимание", "Выберите подписку!")
+            return
+        sub_id = item.data(Qt.ItemDataRole.UserRole)
+        sub = self.sub_manager.get_subscription(sub_id)
+        if self.parent() and hasattr(self.parent(), 'update_subscription_now'):
+            self.parent().update_subscription_now(sub)
+            self.accept()
+
+# ==========================================
+# ОСНОВНОЙ КЛАСС
+# ==========================================
+class XrayClient(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Bobcat Proxy 2.4 пре-релиз №2 - Прокси отключен")
+        self.setFont(QFont("Arial"))
+        self.setMinimumSize(950, 700)
+        self.sub_manager = SubscriptionManager(KEYS_DB_PATH, SUBS_DB_PATH)
+        
+        self.xray_thread = None
+        self.latency_monitor = None
+        self.sub_update_worker = None
+        self.system_proxy_enabled = False
+        self.current_source_filter = "manual"
+        self.current_tunnel_mode = "ru_direct"
+        
+        self.log_styles = {
+            "dark": "background-color: #1e1e1e; color: #00ff00;",
+            "light": "background-color: #ffffff; color: #000000;",
+        }
+        self.current_theme = get_system_theme()
+        
+        self.init_ui()
+        self.log_buffer = []
+        self.log_timer = None
+        
+        try:
+            os.makedirs(LOGS_DIR, exist_ok=True)
+        except Exception:
+            pass
+        
+        print(f"📁 Логи будут в: {LOGS_DIR}")
+        self.log_text.append(f"📁 Путь к логам: {LOGS_DIR}")
+        
+        self.refresh_keys_list()
+        self.refresh_subs_list()
+        self.start_subscription_updates()
+        self.update_status(False)
+        self._load_tunnel_settings()
+
+    def _load_tunnel_settings(self):
+        settings = load_json_file(os.path.join(DATA_DIR, "tunnel_settings.json"), {})
+        self.current_tunnel_mode = settings.get("mode", "ru_direct")
+        self.log_text.append(f"🔧 Режим туннелирования: {TUNNEL_MODES.get(self.current_tunnel_mode, {}).get('name', 'Неизвестно')}")
+
+    def update_tunnel_mode(self, mode_key: str):
+        if mode_key in TUNNEL_MODES:
+            self.current_tunnel_mode = mode_key
+            self.log_text.append(f"🔄 Режим изменён: {TUNNEL_MODES[mode_key]['name']}")
+            if self.xray_thread and self.xray_thread.isRunning():
+                self.log_text.append("⚠️ Перезапустите прокси для применения новых настроек маршрутизации")
+
+    def _get_key_display_mode(self) -> str:
+        """Возвращает текущий режим отображения ключей"""
+        config = load_json_file(os.path.join(DATA_DIR, "ui_settings.json"), {})
+        return config.get("key_display_mode", DEFAULT_KEY_DISPLAY_MODE)
+
+    def _set_key_display_mode(self, mode: str):
+        """Сохраняет выбранный режим отображения"""
+        config = load_json_file(os.path.join(DATA_DIR, "ui_settings.json"), {})
+        config["key_display_mode"] = mode
+        save_json_file(os.path.join(DATA_DIR, "ui_settings.json"), config)
+
+    def _get_log_mode(self) -> str:
+        """Возвращает текущий режим логирования"""
+        config = load_json_file(os.path.join(DATA_DIR, "ui_settings.json"), {})
+        return config.get("log_mode", DEFAULT_LOG_MODE)
+
+    def _set_log_mode(self, mode: str):
+        """Сохраняет выбранный режим логирования"""
+        config = load_json_file(os.path.join(DATA_DIR, "ui_settings.json"), {})
+        config["log_mode"] = mode
+        save_json_file(os.path.join(DATA_DIR, "ui_settings.json"), config)
+
+    def _format_key_display(self, key_data: dict, index: int) -> str:
+        """Форматирует строку отображения ключа согласно выбранному режиму"""
+        key = key_data["key"]
+        source_icon = "📡" if key_data.get("source") == "subscription" else "✋"
+        mode = self._get_key_display_mode()
+        
+        if mode == "legacy":
+            # Старый формат
+            if key.startswith('{') and key.endswith('}'):
+                name = "📄 JSON-конфиг"
+            elif '://' in key:
+                proto, rest = key.split('://', 1)
+                preview = rest[:8] if len(rest) >= 8 else rest
+                name = f"{proto}://{preview}..."
+            else:
+                name = key[:80] + "..." if len(key) > 80 else key
+            return f"{source_icon}{index+1}. {name}"
+        
+        elif mode == "detailed":
+            # Детальный формат
+            parsed = parse_key_for_display(key)
+            addr_short = parsed["address"]
+            if len(addr_short) > 20:
+                addr_short = addr_short[:17] + "..."
+            name = f"{parsed['protocol']} | {addr_short} | {parsed['transport']}"
+            return f"{source_icon}{index+1}. {name}"
+        
+        else:  # hashtag режим
+            parsed = parse_key_for_display(key)
+            hashtag = parsed.get("hashtag", "").strip()
+            if hashtag:
+                # Если хештег слишком длинный, обрезаем
+                if len(hashtag) > 30:
+                    hashtag = hashtag[:27] + "..."
+                name = f"🏷️ {hashtag}"
+            else:
+                # Если хештега нет, показываем протокол и адрес
+                proto = parsed.get("protocol", "???")
+                addr = parsed.get("address", "???")
+                if len(addr) > 15:
+                    addr = addr[:12] + "..."
+                name = f"🔗 {proto} | {addr}"
+            return f"{source_icon}{index+1}. {name}"
+
+    def _change_key_display_mode(self, mode: str):
+        """Обрабатывает смену режима отображения ключей"""
+        if mode in KEY_DISPLAY_MODES:
+            self._set_key_display_mode(mode)
+            self.refresh_keys_list()
+            self.log_text.append(f"🔑 Формат отображения: {KEY_DISPLAY_MODES[mode]}")
+
+    def _change_log_mode(self, mode: str):
+        """Обрабатывает смену режима логирования"""
+        if mode in LOG_MODES:
+            self._set_log_mode(mode)
+            mode_name = LOG_MODES[mode]
+            
+            # Очищаем текущие логи
+            self.log_text.clear()
+            
+            if mode == "debug":
+                self.log_text.append(f"<span style='color:#00bcd4'>🔍 Включен режим отладки</span>")
+                self.log_text.append("<span style='color:#888888'>В этом режиме отображаются все сообщения</span>")
+            else:
+                self.log_text.append(f"📝 Включен обычный режим логирования")
+                self.log_text.append("<span style='color:#888888'>Отображаются только предупреждения и ошибки</span>")
+            
+            self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+
+    def _save_logs_to_file(self):
+        if not self.log_buffer:
+            return
+        now = datetime.now()
+        filename = f"xraylog_{now.day:02d}_{now.month:02d}_{now.year}_{now.hour:02d}_{now.minute:02d}.txt"
+        filepath = os.path.join(LOGS_DIR, filename)
+        try:
+            with open(filepath, 'a', encoding='utf-8') as f:
+                for entry in self.log_buffer:
+                    clean_text = re.sub(r'<[^>]+>', '', entry) if '<' in entry else entry
+                    f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {clean_text}\n")
+            self.log_buffer.clear()
+        except Exception as e:
+            print(f"❌ Ошибка записи лога: {e}")
+
+    def append_log(self, text):
+        try:
+            log_mode = self._get_log_mode()
+            
+            self.log_buffer.append(text)
+            if self.log_timer is None:
+                self.log_timer = QTimer()
+                self.log_timer.timeout.connect(self._save_logs_to_file)
+                self.log_timer.start(60000)
+            
+            # В режиме отладки показываем все сообщения
+            if log_mode == "debug":
+                if "ПРЕДУПРЕЖДЕНИЕ" in text or "❌" in text or "ERROR" in text.upper():
+                    txt = f"<span style='color:#ff6b6b;font-weight:bold'>[DEBUG] {text}</span>"
+                elif "✅" in text or "🟢" in text:
+                    txt = f"<span style='color:#51cf66'>[DEBUG] {text}</span>"
+                elif "⚠️" in text or "🔴" in text or "CRITICAL" in text:
+                    txt = f"<span style='color:#ffa94d'>[DEBUG] {text}</span>"
+                elif "🔄" in text or "📡" in text or "⏳" in text:
+                    txt = f"<span style='color:#00bcd4'>[DEBUG] {text}</span>"
+                else:
+                    txt = f"<span style='color:#888888'>[DEBUG] {text}</span>"
+                self.log_text.append(txt)
+                self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+                return
+            
+            # Обычный режим - фильтруем сообщения
+            if "ПРЕДУПРЕЖДЕНИЕ" in text or "❌" in text or "ERROR" in text.upper():
+                txt = f"<span style='color:#ff6b6b;font-weight:bold'>{text}</span>"
+            elif "✅" in text or "🟢" in text:
+                txt = f"<span style='color:#51cf66'>{text}</span>"
+            elif "⚠️" in text or "🔴" in text or "CRITICAL" in text:
+                txt = f"<span style='color:#ffa94d'>{text}</span>"
+            else:
+                # В обычном режиме пропускаем информационные сообщения
+                return
+            
+            self.log_text.append(txt)
+            self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+        except AttributeError:
+            print(f"[LOG] {text}")
+
+    def cleanup_all(self):
+        if self.log_timer and self.log_timer.isActive():
+            self.log_timer.stop()
+            self._save_logs_to_file()
+        if self.latency_monitor and self.latency_monitor.isRunning():
+            self.latency_monitor.stop()
+            self.latency_monitor.wait(1000)
+        if self.sub_update_worker and self.sub_update_worker.isRunning():
+            self.sub_update_worker.stop()
+            self.sub_update_worker.wait(1000)
+        if self.xray_thread and self.xray_thread.isRunning():
+            self.xray_thread.stop()
+            self.xray_thread.wait()
+        if self.system_proxy_enabled:
+            set_system_proxy(False)
+
+    def init_ui(self):
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+
+        top_bar_layout = QHBoxLayout()
+        
+        self.btn_settings = QPushButton("⚙️ Настройки")
+        self.btn_settings.clicked.connect(self.show_settings_menu)
+        
+        self.btn_subs_manager = QPushButton("📡 Подписки")
+        self.btn_subs_manager.clicked.connect(self.show_subscription_manager)
+        
+        self.chk_system_proxy = QCheckBox("Системный прокси")
+        self.chk_system_proxy.setChecked(False)
+        
+        top_bar_layout.addWidget(self.btn_settings)
+        top_bar_layout.addWidget(self.btn_subs_manager)
+        top_bar_layout.addWidget(self.chk_system_proxy)
+        top_bar_layout.addStretch()
+        left_layout.addLayout(top_bar_layout)
+
+        keys_tabs = QTabWidget()
+
+        all_tab = QWidget()
+        all_layout = QVBoxLayout(all_tab)
+        self.key_selector_all = QComboBox()
+        self.key_selector_all.setEditable(False)
+        self.key_selector_all.currentIndexChanged.connect(self._on_key_selected)
+        all_layout.addWidget(self.key_selector_all)
+        keys_tabs.addTab(all_tab, "📋 Все")
+
+        manual_tab = QWidget()
+        manual_layout = QVBoxLayout(manual_tab)
+        self.key_selector_manual = QComboBox()
+        self.key_selector_manual.setEditable(False)
+        self.key_selector_manual.currentIndexChanged.connect(
+            lambda: self._on_key_selected_tab("manual"))
+        manual_layout.addWidget(self.key_selector_manual)
+        keys_tabs.addTab(manual_tab, "✋ Ручные")
+
+        sub_tab = QWidget()
+        sub_layout = QVBoxLayout(sub_tab)
+        self.key_selector_sub = QComboBox()
+        self.key_selector_sub.setEditable(False)
+        self.key_selector_sub.currentIndexChanged.connect(
+            lambda: self._on_key_selected_tab("subscription"))
+        sub_layout.addWidget(self.key_selector_sub)
+        self.sub_filter = QComboBox()
+        self.sub_filter.addItem("Все подписки")
+        self.sub_filter.currentIndexChanged.connect(self._filter_subs_keys)
+        sub_layout.addWidget(self.sub_filter)
+        keys_tabs.addTab(sub_tab, "📡 Подписки")
+
+        keys_group = QGroupBox("Добавить конфигурацию")
+        keys_layout = QVBoxLayout(keys_group)
+
+        input_layout = QHBoxLayout()
+        self.key_input = QLineEdit()
+        self.key_input.setPlaceholderText("vless://... или vmess://... или JSON")
+        self.btn_add = QPushButton("➕ Добавить")
+        self.btn_add.clicked.connect(self.add_manual_key)
+        input_layout.addWidget(self.key_input)
+        input_layout.addWidget(self.btn_add)
+        keys_layout.addLayout(input_layout)
+
+        add_sub_layout = QHBoxLayout()
+        self.sub_url_input = QLineEdit()
+        self.sub_url_input.setPlaceholderText("URL подписки (Base64/JSON/plain)")
+        self.btn_add_sub_once = QPushButton("📥 Импорт")
+        self.btn_add_sub_once.clicked.connect(self.import_subscription_once)
+        add_sub_layout.addWidget(self.sub_url_input)
+        add_sub_layout.addWidget(self.btn_add_sub_once)
+        keys_layout.addLayout(add_sub_layout)
+
+        json_import_layout = QHBoxLayout()
+        self.json_input = QLineEdit()
+        self.json_input.setPlaceholderText("Путь к .json файлу или вставьте JSON-конфиг")
+        self.btn_import_json = QPushButton("📄 Импорт JSON")
+        self.btn_import_json.clicked.connect(self.import_json_config)
+        self.btn_import_json.setToolTip("Импортировать полный конфиг Xray (inbounds/outbounds)")
+        json_import_layout.addWidget(self.json_input)
+        json_import_layout.addWidget(self.btn_import_json)
+        keys_layout.addLayout(json_import_layout)
+
+        keys_layout.addWidget(keys_tabs)
+
+        delete_layout = QHBoxLayout()
+        self.btn_delete_selected = QPushButton("🗑️ Удалить выбранный")
+        self.btn_delete_selected.clicked.connect(self.delete_selected_key)
+        self.btn_delete_selected.setStyleSheet("background-color: #FF1800; color: white;")
+        self.btn_delete_all = QPushButton("🗑️ Удалить все")
+        self.btn_delete_all.clicked.connect(self.delete_all_keys)
+        self.btn_delete_all.setStyleSheet("background-color: #FF1800; color: white;")
+        delete_layout.addWidget(self.btn_delete_selected)
+        delete_layout.addWidget(self.btn_delete_all)
+        keys_layout.addLayout(delete_layout)
+
+        left_layout.addWidget(keys_group)
+
+        log_group = QGroupBox("Лог xray-core")
+        log_layout = QVBoxLayout(log_group)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setFont(QFont("Monospace", 9))
+        self.log_text.setStyleSheet(self.log_styles[self.current_theme])
+        log_layout.addWidget(self.log_text)
+        left_layout.addWidget(log_group, stretch=1)
+
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.addStretch()
+
+        self.btn_power = QPushButton("ВКЛЮЧИТЬ")
+        self.btn_power.setFixedSize(150, 150)
+        self.btn_power.setStyleSheet("""
+            QPushButton {
+                background-color: #2ecc71; color: white; border-radius: 75px;
+                font-size: 20px; font-weight: bold; border: 4px solid #27ae60;
+            }
+            QPushButton:hover { background-color: #27ae60; }
+            QPushButton:disabled { background-color: #95a5a6; border-color: #7f8c8d; }
+        """)
+        self.btn_power_off_style = """
+            QPushButton {
+                background-color: #e74c3c; color: white; border-radius: 75px;
+                font-size: 20px; font-weight: bold; border: 4px solid #c0392b;
+            }
+            QPushButton:hover { background-color: #c0392b; }
+        """
+        self.btn_power.clicked.connect(self.toggle_proxy)
+        right_layout.addWidget(self.btn_power, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        status_label = QLabel(f"SOCKS5 :{LOCAL_PROXY_PORT}")
+        status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        right_layout.addWidget(status_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        self.tunnel_mode_label = QLabel("")
+        self.tunnel_mode_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tunnel_mode_label.setStyleSheet("color: #0066cc; font-size: 9pt; font-weight: bold;")
+        self._update_tunnel_mode_label()
+        right_layout.addWidget(self.tunnel_mode_label)
+
+        self.status_info = QLabel("")
+        self.status_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_info.setStyleSheet("color: #888; font-size: 9pt;")
+        right_layout.addWidget(self.status_info)
+
+        right_layout.addStretch()
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.addWidget(left_widget)
+        splitter.addWidget(right_widget)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
+        main_layout.addWidget(splitter)
+
+        self.current_key_index = -1
+        self.current_tab = "all"
+
+    def _update_tunnel_mode_label(self):
+        mode_info = TUNNEL_MODES.get(self.current_tunnel_mode, {})
+        self.tunnel_mode_label.setText(f"🔗 {mode_info.get('name', 'Режим не выбран')}")
+
+    def show_settings_menu(self):
+        menu = QMenu(self)
+        menu.setFont(QFont("Arial", 10))
+        
+        # === Пункт переключения формата ключей ===
+        display_menu = QMenu("🔑 Формат отображения ключей", self)
+        
+        current_display_mode = self._get_key_display_mode()
+        
+        for mode_key, mode_name in KEY_DISPLAY_MODES.items():
+            action = QAction(mode_name, self)
+            action.setCheckable(True)
+            action.setChecked(mode_key == current_display_mode)
+            action.triggered.connect(lambda checked, m=mode_key: self._change_key_display_mode(m))
+            display_menu.addAction(action)
+        
+        menu.addMenu(display_menu)
+        
+        # === Пункт переключения режима логирования ===
+        log_menu = QMenu("📝 Режим логирования", self)
+        
+        current_log_mode = self._get_log_mode()
+        
+        for mode_key, mode_name in LOG_MODES.items():
+            action = QAction(mode_name, self)
+            action.setCheckable(True)
+            action.setChecked(mode_key == current_log_mode)
+            action.triggered.connect(lambda checked, m=mode_key: self._change_log_mode(m))
+            log_menu.addAction(action)
+        
+        menu.addMenu(log_menu)
+        # =======================================
+        
+        menu.addSeparator()
+        
+        tunnel_action = QAction("🔐 Маршрутизация", self)
+        tunnel_action.triggered.connect(self.show_tunneling_settings)
+        menu.addAction(tunnel_action)
+        
+        menu.addSeparator()
+        
+        geoip_action = QAction("🌍 Обновить GeoIP/GeoSite", self)
+        geoip_action.triggered.connect(self.update_geo_files)
+        menu.addAction(geoip_action)
+        
+        xray_action = QAction("⬇️ Переустановить Xray-core", self)
+        xray_action.triggered.connect(self.reinstall_xray)
+        menu.addAction(xray_action)
+        
+        menu.addSeparator()
+        
+        about_action = QAction("ℹ️ О программе", self)
+        about_action.triggered.connect(self.show_about)
+        menu.addAction(about_action)
+        
+        menu.exec(self.btn_settings.mapToGlobal(self.btn_settings.rect().bottomLeft()))
+
+    def show_tunneling_settings(self):
+        dialog = TunnelingSettingsDialog(self)
+        dialog.exec()
+
+    def update_geo_files(self):
+        self.log_text.append("🔄 Обновление GeoIP/GeoSite...")
+        success = ensure_geoip_file(DATA_DIR)
+        for mode_key in TUNNEL_MODES:
+            if ensure_geosite_file(mode_key, DATA_DIR):
+                success = True
+        if success:
+            self.log_text.append("✅ Файлы обновлены")
+        else:
+            self.log_text.append("❌ Ошибка обновления файлов")
+
+    def reinstall_xray(self):
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            "Переустановить Xray-core?\nЭто заменит текущую версию.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.log_text.append("⏬ Загрузка Xray-core...")
+            if ensure_xray_binary()[0]:
+                self.log_text.append("✅ Xray-core переустановлен")
+            else:
+                self.log_text.append("❌ Ошибка переустановки")
+
+    def show_about(self):
+        QMessageBox.information(
+            self, "О программе",
+            "Bobcat Proxy 2.4 \n\n"
+            "Клиент для Xray-core с поддержкой:\n"
+            "• VLESS/VMess/Trojan/Shadowsocks\n"
+            "• Автообновление подписок\n"
+            "• Гибкая маршрутизация \n"
+            "• Кроссплатформенность (Linux/Windows)\n\n"
+            "https://github.com/XTLS/Xray-core\n\n"
+            
+        )
+
+    def _on_key_selected(self, index: int):
+        self.current_tab = "all"
+        self.current_key_index = index
+        self._update_status_info()
+
+    def _on_key_selected_tab(self, source: str):
+        self.current_tab = "filtered"
+        self.current_source_filter = source
+        self._update_status_info()
+
+    def _update_status_info(self):
+        keys = self._get_current_keys_list()
+        if 0 <= self.current_key_index < len(keys):
+            key_data = keys[self.current_key_index]
+            source = "✋ Ручной" if key_data.get("source") == "manual" else "📡 Подписка"
+            self.status_info.setText(f"{source} | Добавлен: {key_data.get('added', '?')[:16]}")
+        else:
+            self.status_info.setText("")
+
+    def _get_current_keys_list(self) -> list:
+        if self.current_tab == "all":
+            return self.sub_manager.keys
+        elif self.current_tab == "filtered":
+            return self.sub_manager.get_keys_by_source(self.current_source_filter)
+        return self.sub_manager.keys
+
+    def closeEvent(self, event):
+        self.cleanup_all()
+        event.accept()
+
+    def cleanup_system_proxy(self):
+        if self.system_proxy_enabled:
+            set_system_proxy(False)
+            self.system_proxy_enabled = False
+            self.log_text.append("🔌 Системный прокси отключён")
+
+    def show_subscription_manager(self):
+        dialog = SubscriptionDialog(self.sub_manager, self)
+        dialog.exec()
+        self.refresh_keys_list()
+        self.refresh_subs_list()
+
+    def refresh_keys_list(self):
+        # === Вкладка "Все" ===
+        self.key_selector_all.clear()
+        for i, key_data in enumerate(self.sub_manager.keys):
+            display_text = self._format_key_display(key_data, i)
+            self.key_selector_all.addItem(display_text)
+            if i < self.key_selector_all.count():
+                self.key_selector_all.setItemData(i, key_data["key"][:500] + "..." if len(key_data["key"]) > 500 else key_data["key"], Qt.ItemDataRole.ToolTipRole)
+
+        # === Вкладка "Ручные" ===
+        self.key_selector_manual.clear()
+        manual_keys = self.sub_manager.get_keys_by_source("manual")
+        for i, key_data in enumerate(manual_keys):
+            display_text = self._format_key_display(key_data, i)
+            self.key_selector_manual.addItem(display_text)
+            if i < self.key_selector_manual.count():
+                self.key_selector_manual.setItemData(i, key_data["key"][:500] + "..." if len(key_data["key"]) > 500 else key_data["key"], Qt.ItemDataRole.ToolTipRole)
+
+        # === Вкладка "Подписки" ===
+        self.key_selector_sub.clear()
+        sub_keys = self.sub_manager.get_keys_by_source("subscription")
+        for i, key_data in enumerate(sub_keys):
+            display_text = self._format_key_display(key_data, i)
+            sub_name = self._get_sub_name_by_url(key_data.get("sub_url"))
+            full_text = f"[{sub_name}] {display_text.split('. ', 1)[-1]}"
+            self.key_selector_sub.addItem(full_text)
+            if i < self.key_selector_sub.count():
+                self.key_selector_sub.setItemData(i, key_data["key"][:500] + "..." if len(key_data["key"]) > 500 else key_data["key"], Qt.ItemDataRole.ToolTipRole)
+
+        self._refresh_sub_filter()
+        has_keys = len(self.sub_manager.keys) > 0
+        self.btn_delete_selected.setEnabled(has_keys)
+        self.btn_delete_all.setEnabled(has_keys)
+
+    def _get_sub_name_by_url(self, url: str) -> str:
+        if not url:
+            return "???"
+        for sub in self.sub_manager.subscriptions:
+            if sub["url"] == url:
+                return sub.get("name", url.split("/")[-1][:15])
+        return url.split("/")[-1][:15]
+
+    def _refresh_sub_filter(self):
+        current = self.sub_filter.currentText()
+        self.sub_filter.blockSignals(True)
+        self.sub_filter.clear()
+        self.sub_filter.addItem("Все подписки")
+        for sub in self.sub_manager.subscriptions:
+            name = sub.get("name", sub["url"].split("/")[-1][:20])
+            count = sub.get("key_count", 0)
+            self.sub_filter.addItem(f"{name} ({count})", sub["url"])
+        idx = self.sub_filter.findText(current)
+        if idx >= 0:
+            self.sub_filter.setCurrentIndex(idx)
+        self.sub_filter.blockSignals(False)
+
+    def _filter_subs_keys(self, index: int):
+        if index == 0:
+            keys = self.sub_manager.get_keys_by_source("subscription")
+        else:
+            sub_url = self.sub_filter.itemData(index)
+            keys = [k for k in self.sub_manager.keys
+                   if k.get("source") == "subscription" and k.get("sub_url") == sub_url]
+        self.key_selector_sub.clear()
+        for i, key_data in enumerate(keys):
+            display_text = self._format_key_display(key_data, i)
+            sub_name = self._get_sub_name_by_url(key_data.get('sub_url'))
+            full_text = f"[{sub_name}] {display_text.split('. ', 1)[-1]}"
+            self.key_selector_sub.addItem(full_text)
+            if i < self.key_selector_sub.count():
+                self.key_selector_sub.setItemData(i, key_data["key"][:500] + "..." if len(key_data["key"]) > 500 else key_data["key"], Qt.ItemDataRole.ToolTipRole)
+
+    def refresh_subs_list(self):
+        active = len([s for s in self.sub_manager.subscriptions if s.get("enabled")])
+        if active > 0:
+            self.log_text.append(f"📡 Активно подписок: {active}")
+
+    def delete_selected_key(self):
+        keys = self._get_current_keys_list()
+        if self.current_tab == "all":
+            idx = self.key_selector_all.currentIndex()
+        elif self.current_source_filter == "manual":
+            idx = self.key_selector_manual.currentIndex()
+        else:
+            idx = self.key_selector_sub.currentIndex()
+        if idx == -1 or not keys:
+            QMessageBox.warning(self, "Внимание", "Нет выбранного ключа!")
+            return
+        key_data = keys[idx]
+        preview = key_data["key"][:30] + "..." if len(key_data["key"]) > 30 else key_data["key"]
+        if key_data.get("source") == "subscription":
+            reply = QMessageBox.question(
+                self, "Подтверждение",
+                f"Удалить ключ?\n{preview}\n\n"
+                f"⚠️ Ключ из подписки! Он может вернуться при следующем обновлении.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+        else:
+            reply = QMessageBox.question(
+                self, "Подтверждение",
+                f"Удалить ключ?\n{preview}",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+        if reply == QMessageBox.StandardButton.Yes:
+            key_id = key_data.get("id")
+            self.sub_manager.keys = [k for k in self.sub_manager.keys if k.get("id") != key_id]
+            self.sub_manager._save_keys()
+            self.refresh_keys_list()
+            self.log_text.append("🗑️ Ключ удалён")
+            if not self.sub_manager.keys and self.xray_thread and self.xray_thread.isRunning():
+                self.toggle_proxy()
+
+    def delete_all_keys(self):
+        if not self.sub_manager.keys:
+            QMessageBox.information(self, "Информация", "Список уже пуст!")
+            return
+        reply = QMessageBox.question(
+            self, "Подтверждение",
+            f"Удалить ВСЕ ключи ({len(self.sub_manager.keys)})?\n\n"
+            f"⚠️ Ключи из подписок можно будет восстановить обновлением!",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.sub_manager.keys.clear()
+            self.sub_manager._save_keys()
+            self.refresh_keys_list()
+            self.log_text.append("🗑️ Все ключи удалены!")
+            if self.xray_thread and self.xray_thread.isRunning():
+                self.toggle_proxy()
+
+    def _parse_subscription_data(self, data: str) -> List[str]:
+        data = data.strip()
+        valid_keys = []
+        try:
+            json_data = json.loads(data)
+            if isinstance(json_data, list):
+                for item in json_data:
+                    if isinstance(item, str):
+                        item = item.strip()
+                        if item.startswith(('vmess://', 'vless://', 'trojan://', 'ss://')):
+                            valid_keys.append(item)
+                        elif isinstance(item, dict) and "outbounds" in item:
+                            valid_keys.append(json.dumps(item, ensure_ascii=False))
+            elif isinstance(json_data, dict):
+                if "outbounds" in json_data and "inbounds" in json_data:
+                    valid_keys.append(json.dumps(json_data, ensure_ascii=False))
+                else:
+                    for value in json_data.values():
+                        if isinstance(value, str) and value.startswith(('vmess://', 'vless://', 'trojan://', 'ss://')):
+                            valid_keys.append(value.strip())
+            return valid_keys
+        except json.JSONDecodeError:
+            pass
+        try:
+            padded = data + '=' * (-len(data) % 4)
+            decoded = base64.b64decode(padded).decode('utf-8')
+            lines = [l.strip() for l in decoded.splitlines() if l.strip()]
+            valid_keys = [l for l in lines if l.startswith(('vmess://', 'vless://', 'trojan://', 'ss://'))]
+            if valid_keys:
+                return valid_keys
+        except Exception:
+            pass
+        lines = [l.strip() for l in data.splitlines() if l.strip()]
+        return [l for l in lines if l.startswith(('vmess://', 'vless://', 'trojan://', 'ss://'))]
+
+    def _validate_xray_config(self, config: dict) -> bool:
+        return isinstance(config, dict) and "inbounds" in config and "outbounds" in config
+
+    def import_json_config(self):
+        text = self.json_input.text().strip()
+        if not text:
+            QMessageBox.warning(self, "Внимание", "Введите путь к файлу или вставьте JSON-конфиг!")
+            return
+        config = None
+        if os.path.exists(text) and text.lower().endswith('.json'):
+            try:
+                with open(text, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            except json.JSONDecodeError as e:
+                self.log_text.append(f"❌ Ошибка парсинга файла: {e}")
+                return
+            except Exception as e:
+                self.log_text.append(f"❌ Ошибка чтения файла: {e}")
+                return
+        elif text.startswith('{') and text.endswith('}'):
+            try:
+                config = json.loads(text)
+            except json.JSONDecodeError as e:
+                self.log_text.append(f"❌ Ошибка парсинга JSON: {e}")
+                return
+        if config and self._validate_xray_config(config):
+            config_json = json.dumps(config, ensure_ascii=False, indent=2)
+            for k in self.sub_manager.keys:
+                try:
+                    if json.loads(k["key"]) == config:
+                        self.log_text.append("⚠️ Этот конфиг уже в списке")
+                        self.json_input.clear()
+                        return
+                except Exception:
+                    continue
+            self.sub_manager.add_manual_key(config_json)
+            self.sub_manager._save_keys()
+            self.refresh_keys_list()
+            self.log_text.append(f"✅ JSON-конфиг импортирован | inbounds: {len(config.get('inbounds', []))}, outbounds: {len(config.get('outbounds', []))}")
+        else:
+            self.log_text.append("❌ Неверный формат: требуется конфиг Xray с полями inbounds/outbounds")
+        self.json_input.clear()
+
+    def add_manual_key(self):
+        text = self.key_input.text().strip()
+        if not text:
+            return
+        if text.startswith('{') and text.endswith('}'):
+            try:
+                parsed = json.loads(text)
+                if "outbounds" in parsed and "inbounds" in parsed:
+                    if self.sub_manager.add_manual_key(text):
+                        self.log_text.append("✅ JSON-конфиг добавлен")
+                    else:
+                        self.log_text.append("⚠️ Конфиг уже в списке")
+                    self.sub_manager._save_keys()
+                    self.refresh_keys_list()
+                    self.key_input.clear()
+                    return
+                else:
+                    self.log_text.append("❌ Неверный JSON: отсутствуют outbounds/inbounds")
+                    return
+            except json.JSONDecodeError:
+                self.log_text.append("❌ Ошибка парсинга JSON")
+                return
+        if text.startswith("http"):
+            reply = QMessageBox.question(
+                self, "Обнаружена ссылка",
+                "Это ссылка на подписку.\nДобавить как автообновляемую подписку?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.sub_manager.add_subscription(text)
+                self.log_text.append("📡 Подписка добавлена! Обновление в фоне.")
+                self.refresh_subs_list()
+                self.update_subscription_now(self.sub_manager.get_subscription(text))
+            else:
+                self.import_subscription_once()
+        else:
+            if text.startswith(('vmess://', 'vless://', 'trojan://', 'ss://')):
+                if self.sub_manager.add_manual_key(text):
+                    self.log_text.append("✅ Ключ добавлен")
+                else:
+                    self.log_text.append("⚠️ Ключ уже в списке")
+            else:
+                self.log_text.append("❌ Неверный формат ключа")
+        self.sub_manager._save_keys()
+        self.refresh_keys_list()
+        self.key_input.clear()
+
+    def import_subscription_once(self):
+        url = self.sub_url_input.text().strip()
+        if not url.startswith("http"):
+            QMessageBox.warning(self, "Ошибка", "Введите корректный URL!")
+            return
+        self.log_text.append("📥 Импорт подписки...")
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0'})
+            with urllib.request.urlopen(req, timeout=15) as response:
+                data = response.read().decode('utf-8')
+                valid_keys = self._parse_subscription_data(data)
+                count = 0
+                for key_str in valid_keys:
+                    if self.sub_manager.add_manual_key(key_str):
+                        count += 1
+                self.log_text.append(f"✅ Импортировано {count} ключей")
+                self.sub_manager._save_keys()
+                self.refresh_keys_list()
+        except Exception as e:
+            self.log_text.append(f"❌ Ошибка импорта: {e}")
+        self.sub_url_input.clear()
+
+    def update_subscription_now(self, sub: dict):
+        if not sub:
+            return
+        self.log_text.append(f"🔄 Обновление: {sub.get('name', sub['url'])}")
+        try:
+            req = urllib.request.Request(sub["url"], headers={'User-Agent': 'BobcatProxy/2.1'})
+            with urllib.request.urlopen(req, timeout=30) as response:
+                data = response.read().decode('utf-8')
+                valid_keys = self._parse_subscription_data(data)
+                if valid_keys:
+                    count = self.sub_manager.add_keys_from_subscription(sub["url"], valid_keys)
+                    self.log_text.append(f"✅ {sub.get('name', 'Подписка')}: +{count} новых, всего: {len(valid_keys)}")
+                    self.refresh_keys_list()
+                else:
+                    self.log_text.append(f"⚠️ Не найдено валидных ключей")
+        except Exception as e:
+            self.log_text.append(f"❌ Ошибка обновления: {e}")
+
+    def start_subscription_updates(self):
+        if self.sub_update_worker and self.sub_update_worker.isRunning():
+            return
+        self.sub_update_worker = SubscriptionUpdateWorker(self.sub_manager)
+        self.sub_update_worker.log_signal.connect(self.append_log)
+        self.sub_update_worker.progress_signal.connect(
+            lambda name, cur, total: self.log_text.append(f"⏳ {name}: {cur}/{total}"))
+        self.sub_update_worker.start()
+        self.log_text.append("📡 Автообновление подписок: АКТИВНО")
+
+    def _build_routing_rules(self, tunnel_mode: str) -> List[dict]:
+        rules = []
+        
+        if tunnel_mode == "ru_direct":
+            rules.append({
+                "type": "field",
+                "ip": ["geoip:ru"],
+                "outboundTag": "direct"
+            })
+            rules.append({
+                "type": "field",
+                "outboundTag": "proxy",
+                "network": "tcp,udp"
+            })
+            
+        elif tunnel_mode == "blocked_tunnel":
+            domains = load_geosite_domains(RU_BLOCKED_PATH, "blocked_tunnel")
+            if domains:
+                rules.append({
+                    "type": "field",
+                    "domain": domains,
+                    "outboundTag": "proxy"
+                })
+            rules.append({
+                "type": "field",
+                "outboundTag": "direct",
+                "network": "tcp,udp"
+            })
+        
+        return rules
+
+    def generate_config(self, key_string):
+        try:
+            config = json.loads(key_string)
+            if "outbounds" in config and "inbounds" in config:
+                self.log_text.append("📄 Загружен JSON конфиг")
+                config["routing"]["rules"] = self._build_routing_rules(self.current_tunnel_mode)
+                with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                return True
+        except Exception:
+            pass
+        if key_string.startswith("vless://"):
+            return self._parse_vless(key_string)
+        elif key_string.startswith("vmess://"):
+            return self._parse_vmess(key_string)
+        elif key_string.startswith("trojan://"):
+            return self._parse_trojan(key_string)
+        elif key_string.startswith("ss://"):
+            return self._parse_shadowsocks(key_string)
+        self.log_text.append("❌ Неподдерживаемый формат")
+        return False
+
+    def _parse_vless(self, key_string):
+        try:
+            url_part = key_string[8:]
+            if '#' in url_part:
+                url_part, _ = url_part.split('#', 1)
+            if '?' in url_part:
+                addr_part, query_part = url_part.split('?', 1)
+                params = urllib.parse.parse_qs(query_part)
+            else:
+                addr_part = url_part
+                params = {}
+            get = lambda n, d='': params.get(n, [d])[0]
+            uuid_addr = addr_part.split('@')
+            if len(uuid_addr) != 2:
+                raise ValueError("Invalid VLESS")
+            uuid = uuid_addr[0]
+            address, port_str = uuid_addr[1].rsplit(':', 1)
+            port = int(port_str)
+            sni = get('sni', address)
+            pbk = get('pbk')
+            sid = get('sid')
+            flow = get('flow')
+            fp = get('fp', 'chrome')
+            alpn = get('alpn', 'h2,http/1.1').split(',')
+            net = get('type', 'tcp')
+            path = get('path', '/')
+            host = get('host', sni)
+            security = get('security', 'none')
+            if security == 'none':
+                warning_msg = ("Из соображений безопасности соединений, запуск конфига с параметром "
+                               "security=none невозможен. Пожалуйста, обратитесь к своему VPN провайдеру, "
+                               "т.к. в случае данного параметра ваш трафик идет В ОТКРЫТУЮ и ВИДЕН ПРОВАЙДЕРУ. "
+                               "В том числе ресурсы, которые вы посещаете. Мы не собираемся делать ошибки VPN Generator "
+                               "и подставлять пользователей клиента под статьи из разряда ст.13.53 КоАП РФ за поиск и просмотр чего-либо.")
+                self.log_text.append(f"🔴 {warning_msg}")
+                return False
+            stream = {"network": net, "security": "reality" if pbk else ("tls" if security == "tls" else "none")}
+            if pbk:
+                stream["realitySettings"] = {"show": False, "fingerprint": fp, "serverName": sni,
+                                             "publicKey": pbk, "shortId": sid, "spiderX": get('spx', '')}
+            elif security == "tls":
+                stream["tlsSettings"] = {"allowInsecure": False, "fingerprint": fp, "serverName": sni, "alpn": alpn}
+            if net == "ws":
+                stream["wsSettings"] = {"path": path, "headers": {"Host": host} if host else {}}
+            elif net == "grpc":
+                stream["grpcSettings"] = {"serviceName": get('serviceName', path)}
+            elif net == "tcp" and get('headerType') == 'http':
+                stream["tcpSettings"] = {"header": {"type": "http", "request": {
+                    "path": [path], "headers": {"Host": [host]}}}}
+            outbound = {"vnext": [{"address": address, "port": port, "users": [{
+                "id": uuid, "encryption": "none", "flow": flow if flow else None}]}]}
+            return self._build_config(outbound, stream, f"{address}:{port} (VLESS)")
+        except Exception as e:
+            self.log_text.append(f"❌ VLESS ошибка: {e}")
+            return False
+
+    def _parse_vmess(self, key_string):
+        try:
+            b64 = key_string[8:].strip()
+            b64 += '=' * (-len(b64) % 4)
+            vmess = json.loads(base64.b64decode(b64).decode('utf-8'))
+            address = vmess.get('add', '')
+            port = int(vmess.get('port', 443))
+            uuid = vmess.get('id', '')
+            aid = int(vmess.get('aid', 0))
+            net = vmess.get('net', 'tcp')
+            sni = vmess.get('sni', '') or vmess.get('host', '') or address
+            fp = vmess.get('fp', 'chrome')
+            alpn = vmess.get('alpn', 'h2,http/1.1').split(',') if vmess.get('alpn') else ['h2', 'http/1.1']
+            stream = {"network": net, "security": "tls" if vmess.get('tls') == 'tls' else "none"}
+            if stream["security"] == "tls":
+                stream["tlsSettings"] = {
+                    "allowInsecure": vmess.get('allowInsecure', False) is True,
+                    "fingerprint": fp, "serverName": sni, "alpn": alpn}
+            if net == "ws":
+                stream["wsSettings"] = {"path": vmess.get('path', '/'),
+                                        "headers": {"Host": vmess.get('host', '') or sni}}
+            elif net == "grpc":
+                stream["grpcSettings"] = {"serviceName": vmess.get('path', 'grpc')}
+            elif net == "tcp" and vmess.get('type') == 'http':
+                stream["tcpSettings"] = {"header": {"type": "http", "request": {
+                    "path": [vmess.get('path', '/')], "headers": {"Host": [vmess.get('host', address)]}}}}
+            outbound = {"vnext": [{"address": address, "port": port, "users": [{
+                "id": uuid, "alterId": aid, "security": "auto"}]}]}
+            return self._build_config(outbound, stream, f"{address}:{port} (VMESS)")
+        except Exception as e:
+            self.log_text.append(f"❌ VMESS ошибка: {e}")
+            return False
+
+    def _parse_trojan(self, key_string):
+        try:
+            url_part = key_string[9:]
+            if '#' in url_part:
+                url_part, _ = url_part.split('#', 1)
+            if '?' in url_part:
+                addr_part, query_part = url_part.split('?', 1)
+                params = urllib.parse.parse_qs(query_part)
+            else:
+                addr_part = url_part
+                params = {}
+            get = lambda n, d='': params.get(n, [d])[0]
+            auth_part, host_port = addr_part.split('@')
+            password = urllib.parse.unquote(auth_part)
+            if host_port.startswith('['):
+                end = host_port.index(']')
+                address = host_port[1:end]
+                port_str = host_port[end+2:]
+            elif ':' in host_port:
+                address, port_str = host_port.rsplit(':', 1)
+            else:
+                address = host_port
+                port_str = '443'
+            port = int(port_str)
+            sni = get('sni', address)
+            fp = get('fp', 'chrome')
+            alpn = get('alpn', 'h2,http/1.1').split(',')
+            net = get('type', 'tcp')
+            path = get('path', '/')
+            host = get('host', sni)
+            stream = {"network": net, "security": "tls",
+                      "tlsSettings": {"allowInsecure": get('allowInsecure','0')=='1',
+                                      "fingerprint": fp if fp else 'chrome',
+                                      "serverName": sni, "alpn": alpn}}
+            if net == "ws":
+                stream["wsSettings"] = {"path": path, "headers": {"Host": host} if host else {}}
+            elif net == "grpc":
+                stream["grpcSettings"] = {"serviceName": get('serviceName', path)}
+            elif net == "tcp" and get('headerType') == 'http':
+                stream["tcpSettings"] = {"header": {"type": "http", "request": {
+                    "path": [path] if path else ["/"], "headers": {"Host": [host] if host else [address]}}}}
+            outbound = {"servers": [{"address": address, "port": port, "password": password,
+                                     "flow": get('flow')}]}
+            return self._build_config(outbound, stream, f"{address}:{port} (Trojan)", protocol="trojan")
+        except Exception as e:
+            self.log_text.append(f"❌ Trojan ошибка: {e}")
+            return False
+
+    def _parse_shadowsocks(self, key_string):
+        try:
+            url_part = key_string[5:]
+            if '#' in url_part:
+                url_part, _ = url_part.split('#', 1)
+            if '?' in url_part:
+                addr_part, query_part = url_part.split('?', 1)
+                params = urllib.parse.parse_qs(query_part)
+            else:
+                addr_part = url_part
+                params = {}
+            address = port = method = password = None
+            try:
+                part = addr_part
+                part += '=' * (-len(part) % 4)
+                decoded = base64.b64decode(part).decode('utf-8')
+                if '@' in decoded:
+                    auth, hp = decoded.rsplit('@', 1)
+                    method, password = auth.split(':', 1)
+                    if ':' in hp:
+                        address, port_str = hp.rsplit(':', 1)
+                        port = int(port_str)
+                    else:
+                        address, port = hp, 80
+            except Exception:
+                if '@' in addr_part:
+                    auth, hp = addr_part.split('@', 1)
+                    method, password = auth.split(':', 1)
+                    password = urllib.parse.unquote(password)
+                    if ':' in hp:
+                        address, port_str = hp.rsplit(':', 1)
+                        port = int(port_str)
+                    else:
+                        address, port = hp, 80
+            if not all([address, port, method, password]):
+                raise ValueError("SS parse failed")
+            stream = {"network": "tcp", "security": "none"}
+            plugin = params.get('plugin', [None])[0]
+            if plugin:
+                pparams = dict(p.split('=', 1) for p in plugin.split(';') if '=' in p)
+                if pparams.get('obfs') == 'http':
+                    stream["tcpSettings"] = {"header": {"type": "http", "request": {
+                        "path": [pparams.get('path', '/')],
+                        "headers": {"Host": [pparams.get('host', address)]}}}}
+            outbound = {"servers": [{"address": address, "port": port, "method": method,
+                                     "password": password, "uot": True, "ivCheck": True}]}
+            return self._build_config(outbound, stream, f"{address}:{port} (SS-{method})", protocol="shadowsocks")
+        except Exception as e:
+            self.log_text.append(f"❌ Shadowsocks ошибка: {e}")
+            return False
+
+    def _build_config(self, outbound_settings, stream_settings, server_info, protocol="vless"):
+        proto_map = {"trojan": "trojan", "shadowsocks": "shadowsocks"}
+        outbound_proto = proto_map.get(protocol, "vless")
+        
+        routing_rules = self._build_routing_rules(self.current_tunnel_mode)
+        
+        config = {
+            "log": {"loglevel": "warning"},
+            "dns": {"servers": ["1.1.1.1", "8.8.8.8", "localhost"]},
+            "inbounds": [{"port": LOCAL_PROXY_PORT, "listen": LOCAL_PROXY_HOST, "protocol": "socks",
+                          "settings": {"auth": "noauth", "udp": True, "allowTransparent": False},
+                          "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic", "fakedns"],
+                                       "routeOnly": False, "metadataOnly": False}}],
+            "outbounds": [
+                {"protocol": outbound_proto, "tag": "proxy", "settings": outbound_settings,
+                 "streamSettings": stream_settings, "mux": {"enabled": False, "concurrency": -1}},
+                {"protocol": "freedom", "tag": "direct"},
+                {"protocol": "blackhole", "tag": "block"}
+            ],
+            "routing": {
+                "domainStrategy": "IPIfNonMatch",
+                "rules": routing_rules
+            }
+        }
+        try:
+            with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            mode_name = TUNNEL_MODES.get(self.current_tunnel_mode, {}).get('name', 'Неизвестно')
+            self.log_text.append(f"✅ Конфиг: {server_info} | 🔗 {mode_name}")
+            return True
+        except Exception as e:
+            self.log_text.append(f"❌ Ошибка сохранения: {e}")
+            return False
+
+    def toggle_proxy(self):
+        if self.xray_thread and self.xray_thread.isRunning():
+            self.log_text.append("⏹️ Остановка Xray...")
+            if self.latency_monitor and self.latency_monitor.isRunning():
+                self.latency_monitor.stop()
+                self.latency_monitor.wait(1000)
+            if self.chk_system_proxy.isChecked():
+                self.cleanup_system_proxy()
+            self.xray_thread.stop()
+            self.xray_thread.wait()
+            self.update_status(False)
+        else:
+            keys = self._get_current_keys_list()
+            if self.current_tab == "all":
+                idx = self.key_selector_all.currentIndex()
+            elif self.current_source_filter == "manual":
+                idx = self.key_selector_manual.currentIndex()
+            else:
+                idx = self.key_selector_sub.currentIndex()
+            if idx == -1 or not keys:
+                QMessageBox.warning(self, "Ошибка", "Выберите ключ!")
+                return
+            key_data = keys[idx]
+            key = key_data["key"]
+            if not self.generate_config(key):
+                return
+            self.log_text.append("🚀 Запуск Xray Core...")
+            self.xray_thread = XrayWorker(CONFIG_PATH)
+            self.xray_thread.log_signal.connect(self.append_log)
+            self.xray_thread.finished_signal.connect(self.on_xray_finished)
+            self.xray_thread.start()
+            self.log_text.append("🔍 Монитор задержки: старт")
+            self.latency_monitor = LatencyMonitor(LOCAL_PROXY_HOST, LOCAL_PROXY_PORT)
+            self.latency_monitor.warning_signal.connect(self.append_log)
+            self.latency_monitor.status_signal.connect(self.append_status)
+            self.latency_monitor.start()
+            if self.chk_system_proxy.isChecked():
+                if set_system_proxy(True, LOCAL_PROXY_HOST, LOCAL_PROXY_PORT):
+                    self.system_proxy_enabled = True
+                    self.log_text.append(f"🔌 Системный прокси: {LOCAL_PROXY_HOST}:{LOCAL_PROXY_PORT}")
+                else:
+                    self.log_text.append("⚠️ Не удалось настроить системный прокси")
+            self.update_status(True)
+
+    def append_status(self, text: str):
+        """Добавляет статусное сообщение в лог (всегда показывается)"""
+        log_mode = self._get_log_mode()
+        if log_mode == "debug":
+            self.log_text.append(f"<span style='color:#888888'>[DEBUG] {text}</span>")
+        else:
+            self.log_text.append(f"<span style='color:#888888'>{text}</span>")
+        self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+
+    def on_xray_finished(self):
+        if self.latency_monitor and self.latency_monitor.isRunning():
+            self.latency_monitor.stop()
+            self.latency_monitor.wait(1000)
+            self.latency_monitor = None
+        if self.system_proxy_enabled:
+            self.cleanup_system_proxy()
+        self.update_status(False)
+        self.log_text.append("🔚 Процесс Xray завершён")
+
+    def update_status(self, is_active):
+        if is_active:
+            self.btn_power.setText("ВЫКЛЮЧИТЬ")
+            self.btn_power.setStyleSheet(self.btn_power_off_style)
+            self.setWindowTitle("Bobcat Proxy 2.4 - ВКЛЮЧЕН")
+            self.key_selector_all.setEnabled(False)
+            self.key_selector_manual.setEnabled(False)
+            self.key_selector_sub.setEnabled(False)
+            self.btn_add.setEnabled(False)
+            self.key_input.setEnabled(False)
+            self.sub_url_input.setEnabled(False)
+            self.json_input.setEnabled(False)
+            self.btn_import_json.setEnabled(False)
+            self.chk_system_proxy.setEnabled(False)
+            self.btn_delete_selected.setEnabled(False)
+            self.btn_delete_all.setEnabled(False)
+            self.btn_subs_manager.setEnabled(False)
+            self.btn_settings.setEnabled(False)
+        else:
+            self.btn_power.setText("ВКЛЮЧИТЬ")
+            self.btn_power.setStyleSheet("""
+                QPushButton { background-color:#00F267;color:white;border-radius:75px;
+                    font-size:20px;font-weight:bold;border:4px solid #27ae60; }
+                QPushButton:hover { background-color:#27ae60; }""")
+            self.setWindowTitle("Bobcat Proxy 2.4 - Прокси отключен")
+            self.key_selector_all.setEnabled(True)
+            self.key_selector_manual.setEnabled(True)
+            self.key_selector_sub.setEnabled(True)
+            self.btn_add.setEnabled(True)
+            self.key_input.setEnabled(True)
+            self.sub_url_input.setEnabled(True)
+            self.json_input.setEnabled(True)
+            self.btn_import_json.setEnabled(True)
+            self.chk_system_proxy.setEnabled(True)
+            self.btn_subs_manager.setEnabled(True)
+            self.btn_settings.setEnabled(True)
+            has = len(self.sub_manager.keys) > 0
+            self.btn_delete_selected.setEnabled(has)
+            self.btn_delete_all.setEnabled(has)
+
+# ==========================================
+# ЗАПУСК
+# ==========================================
+if __name__ == "__main__":
+    if platform.system() != 'Windows':
+        os.environ.setdefault('QT_QPA_PLATFORM', 'wayland;xcb')
+        os.environ.setdefault('QT_STYLE_OVERRIDE', 'fusion')
+    app = QApplication([])
+    app.setFont(QFont("Arial", 10))
+    window = XrayClient()
+    window.show()
+    app.exec()
