@@ -73,7 +73,7 @@ RU_BLOCKED_URL = "https://github.com/runetfreedom/russia-blocked-geosite/release
 XRAY_LINUX_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
 XRAY_WINDOWS_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip"
 
-# Режимы туннелирования (ДОБАВЛЕН РЕЖИМ "ВСЁ В VPN")
+# Режимы туннелирования
 TUNNEL_MODES = {
     "ru_direct": {
         "name": "Российские напрямую",
@@ -87,7 +87,7 @@ TUNNEL_MODES = {
         "file": RU_BLOCKED_PATH,
         "url": RU_BLOCKED_URL
     },
-    "all_vpn": {  # НОВЫЙ РЕЖИМ
+    "all_vpn": {
         "name": "Всё в VPN",
         "desc": "Весь трафик идёт через VPN (все домены и IP через прокси)",
         "file": None,
@@ -109,7 +109,6 @@ LOG_MODES = {
     "debug": "Режим отладки (debug)"
 }
 DEFAULT_LOG_MODE = "normal"
-
 # ==========================================
 # ОПРЕДЕЛЕНИЕ ТЕМЫ СИСТЕМЫ
 # ==========================================
@@ -176,18 +175,47 @@ def get_system_theme() -> str:
         return get_linux_theme()
 
 # ==========================================
-# ЗАГРУЗКА ФАЙЛОВ
+# НАСТРОЙКА SSL ДЛЯ WINDOWS
 # ==========================================
-def download_file(url: str, destination: str, timeout: int = 60) -> bool:
+def create_ssl_context():
+    """Создаёт SSL контекст с отключенной проверкой сертификатов для решения проблем на Windows"""
+    try:
+        # Пытаемся создать контекст без проверки сертификатов
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return context
+    except Exception:
+        return None
+
+def create_opener_with_ssl_fix():
+    """Создаёт URL opener с исправлением SSL проблем на Windows"""
+    context = create_ssl_context()
+    if context:
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context))
+    else:
+        opener = urllib.request.build_opener()
+    
+    opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0')]
+    return opener
+
+# Глобальный opener для загрузок
+URL_OPENER = create_opener_with_ssl_fix()
+
+# ==========================================
+# ЗАГРУЗКА ФАЙЛОВ С SSL FIX
+# ==========================================
+def download_file(url: str, destination: str, timeout: int = 120) -> bool:
     try:
         print(f"⏬ Загрузка: {url}")
         print(f"📁 Сохранение в: {destination}")
         
+        # Используем наш opener с SSL fix
         req = urllib.request.Request(url, headers={
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0'
         })
         
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with URL_OPENER.open(req, timeout=timeout) as response:
             total_size = int(response.headers.get('content-length', 0))
             downloaded = 0
             chunk_size = 8192
@@ -207,6 +235,22 @@ def download_file(url: str, destination: str, timeout: int = 60) -> bool:
         return True
     except Exception as e:
         print(f"❌ Ошибка загрузки {url}: {e}")
+        # Пробуем альтернативный метод с использованием requests если доступен
+        try:
+            import requests
+            print("🔄 Пробуем альтернативный метод загрузки через requests...")
+            response = requests.get(url, timeout=timeout, verify=False, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0'
+            })
+            response.raise_for_status()
+            with open(destination, 'wb') as f:
+                f.write(response.content)
+            print(f"✅ Загрузка завершена (альтернативный метод): {destination}")
+            return True
+        except ImportError:
+            print("⚠️ Библиотека requests не установлена, используем стандартный метод")
+        except Exception as e2:
+            print(f"❌ Альтернативный метод также не сработал: {e2}")
         return False
 
 def download_and_extract_zip(url: str, extract_to: str, timeout: int = 120) -> bool:
@@ -215,10 +259,10 @@ def download_and_extract_zip(url: str, extract_to: str, timeout: int = 120) -> b
         zip_path = os.path.join(DATA_DIR, "xray_temp.zip")
         
         req = urllib.request.Request(url, headers={
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0'
         })
         
-        with urllib.request.urlopen(req, timeout=timeout) as response:
+        with URL_OPENER.open(req, timeout=timeout) as response:
             with open(zip_path, 'wb') as f:
                 while True:
                     chunk = response.read(8192)
@@ -235,6 +279,26 @@ def download_and_extract_zip(url: str, extract_to: str, timeout: int = 120) -> b
         return True
     except Exception as e:
         print(f"❌ Ошибка установки Xray: {e}")
+        # Пробуем альтернативный метод
+        try:
+            import requests
+            print("🔄 Пробуем альтернативный метод загрузки через requests...")
+            response = requests.get(url, timeout=timeout, verify=False, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0'
+            })
+            response.raise_for_status()
+            with open(zip_path, 'wb') as f:
+                f.write(response.content)
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_to)
+            os.remove(zip_path)
+            print("✅ Xray-core успешно установлен (альтернативный метод)")
+            return True
+        except ImportError:
+            pass
+        except Exception as e2:
+            print(f"❌ Альтернативный метод также не сработал: {e2}")
+        
         if os.path.exists(os.path.join(DATA_DIR, "xray_temp.zip")):
             os.remove(os.path.join(DATA_DIR, "xray_temp.zip"))
         return False
@@ -250,7 +314,7 @@ def ensure_geoip_file(data_dir: str) -> bool:
 def ensure_geosite_file(mode_key: str, data_dir: str) -> bool:
     mode = TUNNEL_MODES.get(mode_key)
     if not mode or mode.get("file") is None:
-        return True  # Для режима "Всё в VPN" файлы не нужны
+        return True
     
     file_path = mode["file"]
     url = mode["url"]
@@ -290,8 +354,18 @@ def ensure_xray_binary() -> Tuple[Optional[str], str]:
     
     return None, bin_name
 
-XRAY_PATH, XRAY_BINARY = ensure_xray_binary()
-ensure_geoip_file(DATA_DIR)
+# Инициализация с обработкой ошибок
+try:
+    XRAY_PATH, XRAY_BINARY = ensure_xray_binary()
+except Exception as e:
+    print(f"⚠️ Ошибка при проверке Xray: {e}")
+    XRAY_PATH = None
+    XRAY_BINARY = "xray"
+
+try:
+    ensure_geoip_file(DATA_DIR)
+except Exception as e:
+    print(f"⚠️ Ошибка при загрузке geoip.dat: {e}")
 
 # ==========================================
 # УТИЛИТЫ
@@ -360,7 +434,6 @@ def parse_key_for_display(key_string: str) -> Dict[str, str]:
                         result["address"] = settings["servers"][0].get("address", "???")
                     stream = ob.get("streamSettings", {})
                     result["transport"] = stream.get("network", "tcp").upper()
-                    # Для JSON пробуем получить хештег из тега
                     tag = ob.get("tag", "")
                     if tag and tag != "proxy":
                         result["hashtag"] = tag
@@ -395,7 +468,6 @@ def parse_key_for_display(key_string: str) -> Dict[str, str]:
             result["protocol"] = "VMESS"
             b64 = key_string[8:].strip()
             hashtag = ""
-            # Проверяем, есть ли хештег в самом URL
             if '#' in b64:
                 b64, hashtag = b64.split('#', 1)
                 result["hashtag"] = urllib.parse.unquote(hashtag)
@@ -404,7 +476,6 @@ def parse_key_for_display(key_string: str) -> Dict[str, str]:
                 vmess = json.loads(base64.b64decode(b64).decode('utf-8'))
                 result["address"] = vmess.get('add', '???')
                 result["transport"] = vmess.get('net', 'tcp').upper()
-                # Если хештега нет в URL, пробуем взять из поля ps
                 if not result["hashtag"]:
                     ps = vmess.get('ps', '')
                     if ps:
@@ -694,7 +765,7 @@ def set_system_proxy(enable: bool, host: str = "127.0.0.1", port: int = 25443):
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
                 if enable:
                     winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
-                    winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"{host}:{port}")
+                    winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"socks={host}:{port}")
                 else:
                     winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         except Exception as e:
@@ -812,6 +883,28 @@ class SubscriptionUpdateWorker(QThread):
                     break
                 self.msleep(1000)
 
+    def _fetch_url_with_ssl_fix(self, url: str) -> str:
+        """Загружает URL с обработкой SSL ошибок"""
+        try:
+            req = urllib.request.Request(url, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0'
+            })
+            with URL_OPENER.open(req, timeout=30) as response:
+                return response.read().decode('utf-8')
+        except Exception as e:
+            # Пробуем через requests
+            try:
+                import requests
+                response = requests.get(url, timeout=30, verify=False, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0'
+                })
+                response.raise_for_status()
+                return response.text
+            except ImportError:
+                raise e
+            except Exception as e2:
+                raise e2
+
     def _parse_subscription_data(self, data: str) -> List[str]:
         data = data.strip()
         valid_keys = []
@@ -851,19 +944,13 @@ class SubscriptionUpdateWorker(QThread):
     def _update_single_subscription(self, sub: dict) -> Tuple[bool, str]:
         url = sub["url"]
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0'})
-            with urllib.request.urlopen(req, timeout=30) as response:
-                data = response.read().decode('utf-8')
-                valid_keys = self._parse_subscription_data(data)
-                if valid_keys:
-                    count = self.sub_manager.add_keys_from_subscription(url, valid_keys)
-                    return True, f"Обновлено: {count} новых ключей, всего: {sub.get('key_count', len(valid_keys))}"
-                else:
-                    return False, "Не найдено валидных ключей в подписке"
-        except urllib.error.HTTPError as e:
-            return False, f"HTTP ошибка {e.code}: {e.reason}"
-        except urllib.error.URLError as e:
-            return False, f"Ошибка сети: {e.reason}"
+            data = self._fetch_url_with_ssl_fix(url)
+            valid_keys = self._parse_subscription_data(data)
+            if valid_keys:
+                count = self.sub_manager.add_keys_from_subscription(url, valid_keys)
+                return True, f"Обновлено: {count} новых ключей, всего: {sub.get('key_count', len(valid_keys))}"
+            else:
+                return False, "Не найдено валидных ключей в подписке"
         except Exception as e:
             return False, f"Ошибка: {str(e)}"
 
@@ -933,7 +1020,7 @@ class XrayWorker(QThread):
                     pass
 
 # ==========================================
-# ДИАЛОГ НАСТРОЕК МАРШРУТИЗАЦИИ (С ДОБАВЛЕННЫМ РЕЖИМОМ "ВСЁ В VPN")
+# ДИАЛОГ НАСТРОЕК МАРШРУТИЗАЦИИ
 # ==========================================
 class TunnelingSettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -963,7 +1050,6 @@ class TunnelingSettingsDialog(QDialog):
             self.mode_radio[mode_key] = radio
             mode_layout.addWidget(radio)
         
-        # Добавляем пояснение для режима "Всё в VPN"
         info_label = QLabel("ℹ️ Режим 'Всё в VPN' направляет ВЕСЬ трафик через прокси-сервер")
         info_label.setStyleSheet("color: #888; font-size: 9pt; margin-top: 8px;")
         mode_layout.addWidget(info_label)
@@ -1240,7 +1326,7 @@ class SubscriptionDialog(QDialog):
 class XrayClient(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Bobcat Proxy 2.5 pre2 - Прокси отключен")
+        self.setWindowTitle("Bobcat Proxy 2.5 pre3 - Прокси отключен")
         self.setFont(QFont("Arial"))
         self.setMinimumSize(950, 700)
         self.sub_manager = SubscriptionManager(KEYS_DB_PATH, SUBS_DB_PATH)
@@ -1290,43 +1376,33 @@ class XrayClient(QMainWindow):
                 self.log_text.append("⚠️ Перезапустите прокси для применения новых настроек маршрутизации")
 
     def _get_key_display_mode(self) -> str:
-        """Возвращает текущий режим отображения ключей"""
         config = load_json_file(os.path.join(DATA_DIR, "ui_settings.json"), {})
         return config.get("key_display_mode", DEFAULT_KEY_DISPLAY_MODE)
 
     def _set_key_display_mode(self, mode: str):
-        """Сохраняет выбранный режим отображения"""
         config = load_json_file(os.path.join(DATA_DIR, "ui_settings.json"), {})
         config["key_display_mode"] = mode
         save_json_file(os.path.join(DATA_DIR, "ui_settings.json"), config)
 
     def _get_log_mode(self) -> str:
-        """Возвращает текущий режим логирования (для xray-core: normal=warning, debug=debug)"""
         config = load_json_file(os.path.join(DATA_DIR, "ui_settings.json"), {})
         return config.get("log_mode", DEFAULT_LOG_MODE)
     
     def _get_xray_loglevel(self) -> str:
-        """Возвращает уровень логирования для xray-core на основе выбранного режима"""
         log_mode = self._get_log_mode()
-        if log_mode == "debug":
-            return "debug"
-        else:
-            return "warning"  # default режим
+        return "debug" if log_mode == "debug" else "warning"
 
     def _set_log_mode(self, mode: str):
-        """Сохраняет выбранный режим логирования"""
         config = load_json_file(os.path.join(DATA_DIR, "ui_settings.json"), {})
         config["log_mode"] = mode
         save_json_file(os.path.join(DATA_DIR, "ui_settings.json"), config)
 
     def _format_key_display(self, key_data: dict, index: int) -> str:
-        """Форматирует строку отображения ключа согласно выбранному режиму"""
         key = key_data["key"]
         source_icon = "📡" if key_data.get("source") == "subscription" else "✋"
         mode = self._get_key_display_mode()
         
         if mode == "legacy":
-            # Старый формат
             if key.startswith('{') and key.endswith('}'):
                 name = "📄 JSON-конфиг"
             elif '://' in key:
@@ -1338,7 +1414,6 @@ class XrayClient(QMainWindow):
             return f"{source_icon}{index+1}. {name}"
         
         elif mode == "detailed":
-            # Детальный формат
             parsed = parse_key_for_display(key)
             addr_short = parsed["address"]
             if len(addr_short) > 20:
@@ -1346,16 +1421,14 @@ class XrayClient(QMainWindow):
             name = f"{parsed['protocol']} | {addr_short} | {parsed['transport']}"
             return f"{source_icon}{index+1}. {name}"
         
-        else:  # hashtag режим
+        else:
             parsed = parse_key_for_display(key)
             hashtag = parsed.get("hashtag", "").strip()
             if hashtag:
-                # Если хештег слишком длинный, обрезаем
                 if len(hashtag) > 30:
                     hashtag = hashtag[:27] + "..."
                 name = f"🏷️ {hashtag}"
             else:
-                # Если хештега нет, показываем протокол и адрес
                 proto = parsed.get("protocol", "???")
                 addr = parsed.get("address", "???")
                 if len(addr) > 15:
@@ -1364,19 +1437,16 @@ class XrayClient(QMainWindow):
             return f"{source_icon}{index+1}. {name}"
 
     def _change_key_display_mode(self, mode: str):
-        """Обрабатывает смену режима отображения ключей"""
         if mode in KEY_DISPLAY_MODES:
             self._set_key_display_mode(mode)
             self.refresh_keys_list()
             self.log_text.append(f"🔑 Формат отображения: {KEY_DISPLAY_MODES[mode]}")
 
     def _change_log_mode(self, mode: str):
-        """Обрабатывает смену режима логирования"""
         if mode in LOG_MODES:
             self._set_log_mode(mode)
             mode_name = LOG_MODES[mode]
             
-            # Очищаем текущие логи
             self.log_text.clear()
             
             if mode == "debug":
@@ -1413,7 +1483,6 @@ class XrayClient(QMainWindow):
                 self.log_timer.timeout.connect(self._save_logs_to_file)
                 self.log_timer.start(60000)
             
-            # В режиме отладки показываем все сообщения
             if log_mode == "debug":
                 if "ПРЕДУПРЕЖДЕНИЕ" in text or "❌" in text or "ERROR" in text.upper():
                     txt = f"<span style='color:#ff6b6b;font-weight:bold'>[DEBUG] {text}</span>"
@@ -1429,7 +1498,6 @@ class XrayClient(QMainWindow):
                 self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
                 return
             
-            # Обычный режим - фильтруем сообщения
             if "ПРЕДУПРЕЖДЕНИЕ" in text or "❌" in text or "ERROR" in text.upper():
                 txt = f"<span style='color:#ff6b6b;font-weight:bold'>{text}</span>"
             elif "✅" in text or "🟢" in text:
@@ -1437,7 +1505,6 @@ class XrayClient(QMainWindow):
             elif "⚠️" in text or "🔴" in text or "CRITICAL" in text:
                 txt = f"<span style='color:#ffa94d'>{text}</span>"
             else:
-                # В обычном режиме пропускаем информационные сообщения
                 return
             
             self.log_text.append(txt)
@@ -1634,43 +1701,32 @@ class XrayClient(QMainWindow):
         menu = QMenu(self)
         menu.setFont(QFont("Arial", 10))
         
-        # === Пункт переключения формата ключей ===
         display_menu = QMenu("🔑 Формат отображения ключей", self)
-        
         current_display_mode = self._get_key_display_mode()
-        
         for mode_key, mode_name in KEY_DISPLAY_MODES.items():
             action = QAction(mode_name, self)
             action.setCheckable(True)
             action.setChecked(mode_key == current_display_mode)
             action.triggered.connect(lambda checked, m=mode_key: self._change_key_display_mode(m))
             display_menu.addAction(action)
-        
         menu.addMenu(display_menu)
         
-        # === Пункт переключения режима логирования ===
         log_menu = QMenu("📝 Режим логирования xray-core", self)
-        
         current_log_mode = self._get_log_mode()
-        
         for mode_key, mode_name in LOG_MODES.items():
             action = QAction(mode_name, self)
             action.setCheckable(True)
             action.setChecked(mode_key == current_log_mode)
             action.triggered.connect(lambda checked, m=mode_key: self._change_log_mode(m))
             log_menu.addAction(action)
-        
         menu.addMenu(log_menu)
-        # =======================================
         
         menu.addSeparator()
-        
         tunnel_action = QAction("🔐 Маршрутизация", self)
         tunnel_action.triggered.connect(self.show_tunneling_settings)
         menu.addAction(tunnel_action)
         
         menu.addSeparator()
-        
         geoip_action = QAction("🌍 Обновить GeoIP/GeoSite", self)
         geoip_action.triggered.connect(self.update_geo_files)
         menu.addAction(geoip_action)
@@ -1680,7 +1736,6 @@ class XrayClient(QMainWindow):
         menu.addAction(xray_action)
         
         menu.addSeparator()
-        
         about_action = QAction("ℹ️ О программе", self)
         about_action.triggered.connect(self.show_about)
         menu.addAction(about_action)
@@ -1720,14 +1775,13 @@ class XrayClient(QMainWindow):
     def show_about(self):
         QMessageBox.information(
             self, "О программе",
-            "Bobcat Proxy 2.5 pre2 \n\n"
+            "Bobcat Proxy 2.5 pre3 \n\n"
             "Клиент для Xray-core с поддержкой:\n"
             "• VLESS/VMess/Trojan/Shadowsocks\n"
             "• Автообновление подписок\n"
             "• Гибкая маршрутизация (включая режим 'Всё в VPN')\n"
             "• Кроссплатформенность (Linux/Windows)\n\n"
             "https://github.com/XTLS/Xray-core\n\n"
-            
         )
 
     def _on_key_selected(self, index: int):
@@ -1773,7 +1827,6 @@ class XrayClient(QMainWindow):
         self.refresh_subs_list()
 
     def refresh_keys_list(self):
-        # === Вкладка "Все" ===
         self.key_selector_all.clear()
         for i, key_data in enumerate(self.sub_manager.keys):
             display_text = self._format_key_display(key_data, i)
@@ -1781,7 +1834,6 @@ class XrayClient(QMainWindow):
             if i < self.key_selector_all.count():
                 self.key_selector_all.setItemData(i, key_data["key"][:500] + "..." if len(key_data["key"]) > 500 else key_data["key"], Qt.ItemDataRole.ToolTipRole)
 
-        # === Вкладка "Ручные" ===
         self.key_selector_manual.clear()
         manual_keys = self.sub_manager.get_keys_by_source("manual")
         for i, key_data in enumerate(manual_keys):
@@ -1790,7 +1842,6 @@ class XrayClient(QMainWindow):
             if i < self.key_selector_manual.count():
                 self.key_selector_manual.setItemData(i, key_data["key"][:500] + "..." if len(key_data["key"]) > 500 else key_data["key"], Qt.ItemDataRole.ToolTipRole)
 
-        # === Вкладка "Подписки" ===
         self.key_selector_sub.clear()
         sub_keys = self.sub_manager.get_keys_by_source("subscription")
         for i, key_data in enumerate(sub_keys):
@@ -2038,8 +2089,8 @@ class XrayClient(QMainWindow):
             return
         self.log_text.append("📥 Импорт подписки...")
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:148.0) Gecko/20100101 Firefox/148.0'})
-            with urllib.request.urlopen(req, timeout=15) as response:
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0'})
+            with URL_OPENER.open(req, timeout=30) as response:
                 data = response.read().decode('utf-8')
                 valid_keys = self._parse_subscription_data(data)
                 count = 0
@@ -2058,8 +2109,8 @@ class XrayClient(QMainWindow):
             return
         self.log_text.append(f"🔄 Обновление: {sub.get('name', sub['url'])}")
         try:
-            req = urllib.request.Request(sub["url"], headers={'User-Agent': 'BobcatProxy/2.1'})
-            with urllib.request.urlopen(req, timeout=30) as response:
+            req = urllib.request.Request(sub["url"], headers={'User-Agent': 'BobcatProxy/2.5'})
+            with URL_OPENER.open(req, timeout=30) as response:
                 data = response.read().decode('utf-8')
                 valid_keys = self._parse_subscription_data(data)
                 if valid_keys:
@@ -2085,7 +2136,6 @@ class XrayClient(QMainWindow):
         rules = []
         
         if tunnel_mode == "all_vpn":
-            # Режим "Всё в VPN" - весь трафик через прокси
             rules.append({
                 "type": "field",
                 "outboundTag": "proxy",
@@ -2125,9 +2175,7 @@ class XrayClient(QMainWindow):
             config = json.loads(key_string)
             if "outbounds" in config and "inbounds" in config:
                 self.log_text.append("📄 Загружен JSON конфиг")
-                # Устанавливаем уровень логирования в зависимости от выбранного режима
                 config["log"] = {"loglevel": self._get_xray_loglevel()}
-                # Обновляем routing rules с учётом текущего режима
                 if "routing" not in config:
                     config["routing"] = {}
                 config["routing"]["rules"] = self._build_routing_rules(self.current_tunnel_mode)
@@ -2160,7 +2208,6 @@ class XrayClient(QMainWindow):
                 params = {}
             get = lambda n, d='': params.get(n, [d])[0]
 
-            # Проверяем allowInsecure и БЛОКИРУЕМ запуск (для особо тупых VPN провайдеров)
             allow_insecure_param = get('allowInsecure', '0')
             if allow_insecure_param == '1' or allow_insecure_param.lower() == 'true':
                 warning_msg = ("Из соображений безопасности соединений, запуск конфига с параметром "
@@ -2222,7 +2269,6 @@ class XrayClient(QMainWindow):
             b64 += '=' * (-len(b64) % 4)
             vmess = json.loads(base64.b64decode(b64).decode('utf-8'))
             
-            # Проверяем allowInsecure и БЛОКИРУЕМ запуск
             allow_insecure = vmess.get('allowInsecure', False)
             if allow_insecure is True or allow_insecure == '1' or allow_insecure == 1 or str(allow_insecure).lower() == 'true':
                 warning_msg = ("Из соображений безопасности соединений, запуск конфига с параметром "
@@ -2277,7 +2323,6 @@ class XrayClient(QMainWindow):
                 params = {}
             get = lambda n, d='': params.get(n, [d])[0]
             
-            # Проверяем allowInsecure и БЛОКИРУЕМ запуск
             allow_insecure_param = get('allowInsecure', '0')
             if allow_insecure_param == '1':
                 warning_msg = ("Из соображений безопасности соединений, запуск конфига с параметром "
@@ -2383,7 +2428,7 @@ class XrayClient(QMainWindow):
         routing_rules = self._build_routing_rules(self.current_tunnel_mode)
         
         config = {
-            "log": {"loglevel": self._get_xray_loglevel()},  # warning по умолчанию, debug при выборе
+            "log": {"loglevel": self._get_xray_loglevel()},
             "dns": {"servers": ["1.1.1.1", "8.8.8.8", "localhost"]},
             "inbounds": [{"port": LOCAL_PROXY_PORT, "listen": LOCAL_PROXY_HOST, "protocol": "socks",
                           "settings": {"auth": "noauth", "udp": True, "allowTransparent": False},
@@ -2456,7 +2501,6 @@ class XrayClient(QMainWindow):
             self.update_status(True)
 
     def append_status(self, text: str):
-        """Добавляет статусное сообщение в лог (всегда показывается)"""
         log_mode = self._get_log_mode()
         if log_mode == "debug":
             self.log_text.append(f"<span style='color:#888888'>[DEBUG] {text}</span>")
@@ -2478,7 +2522,7 @@ class XrayClient(QMainWindow):
         if is_active:
             self.btn_power.setText("ВЫКЛЮЧИТЬ")
             self.btn_power.setStyleSheet(self.btn_power_off_style)
-            self.setWindowTitle("Bobcat Proxy 2.5 pre2 - ВКЛЮЧЕН")
+            self.setWindowTitle("Bobcat Proxy 2.5 pre3 - ВКЛЮЧЕН")
             self.key_selector_all.setEnabled(False)
             self.key_selector_manual.setEnabled(False)
             self.key_selector_sub.setEnabled(False)
@@ -2498,7 +2542,7 @@ class XrayClient(QMainWindow):
                 QPushButton { background-color:#00F267;color:white;border-radius:75px;
                     font-size:20px;font-weight:bold;border:4px solid #27ae60; }
                 QPushButton:hover { background-color:#27ae60; }""")
-            self.setWindowTitle("Bobcat Proxy 2.5 pre1 - Прокси отключен")
+            self.setWindowTitle("Bobcat Proxy 2.5 pre3 - Прокси отключен")
             self.key_selector_all.setEnabled(True)
             self.key_selector_manual.setEnabled(True)
             self.key_selector_sub.setEnabled(True)
