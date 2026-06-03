@@ -70,8 +70,8 @@ GEOIP_URL = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/dow
 GEOSITE_URL = "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/download/202604112225/geosite.dat"
 GEOSITE_RU_ONLY_URL = "https://github.com/runetfreedom/russia-blocked-geosite/releases/download/202604112126/geosite-ru-only.dat"
 RU_BLOCKED_URL = "https://github.com/runetfreedom/russia-blocked-geosite/releases/download/202604112126/ru-blocked-all.txt"
-XRAY_LINUX_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip"
-XRAY_WINDOWS_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip"
+XRAY_LINUX_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.6.1/Xray-linux-64.zip"
+XRAY_WINDOWS_URL = "https://github.com/XTLS/Xray-core/releases/download/v26.6.1/Xray-windows-64.zip"
 
 # Режимы туннелирования
 TUNNEL_MODES = {
@@ -1326,7 +1326,7 @@ class SubscriptionDialog(QDialog):
 class XrayClient(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Bobcat Proxy 2.5 pre3 - Прокси отключен")
+        self.setWindowTitle("Bobcat Proxy 2.5 pre4 - Прокси отключен")
         self.setFont(QFont("Arial"))
         self.setMinimumSize(950, 700)
         self.sub_manager = SubscriptionManager(KEYS_DB_PATH, SUBS_DB_PATH)
@@ -2522,7 +2522,7 @@ class XrayClient(QMainWindow):
         if is_active:
             self.btn_power.setText("ВЫКЛЮЧИТЬ")
             self.btn_power.setStyleSheet(self.btn_power_off_style)
-            self.setWindowTitle("Bobcat Proxy 2.5 pre3 - ВКЛЮЧЕН")
+            self.setWindowTitle("Bobcat Proxy 2.5 pre4 - ВКЛЮЧЕН")
             self.key_selector_all.setEnabled(False)
             self.key_selector_manual.setEnabled(False)
             self.key_selector_sub.setEnabled(False)
@@ -2542,7 +2542,7 @@ class XrayClient(QMainWindow):
                 QPushButton { background-color:#00F267;color:white;border-radius:75px;
                     font-size:20px;font-weight:bold;border:4px solid #27ae60; }
                 QPushButton:hover { background-color:#27ae60; }""")
-            self.setWindowTitle("Bobcat Proxy 2.5 pre3 - Прокси отключен")
+            self.setWindowTitle("Bobcat Proxy 2.5 pre4 - Прокси отключен")
             self.key_selector_all.setEnabled(True)
             self.key_selector_manual.setEnabled(True)
             self.key_selector_sub.setEnabled(True)
