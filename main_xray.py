@@ -2272,7 +2272,7 @@ class XrayClient(QMainWindow):
     def show_about(self):
         QMessageBox.information(
             self, "О программе",
-            f"Bobcat Proxy 2.5 pre3\n\n"
+            f"Bobcat Proxy 2.5 \n\n"
             f"Клиент для Xray-core с поддержкой:\n"
             f"• VLESS/VMess/Trojan/Shadowsocks\n"
             f"• Автообновление подписок\n"
